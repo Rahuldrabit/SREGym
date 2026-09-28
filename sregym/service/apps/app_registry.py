@@ -1,6 +1,7 @@
 import json
 
 from sregym.paths import *  # noqa: F403
+from sregym.service.apps.agentic_rag_platform import AgenticRAGPlatform
 from sregym.service.apps.astronomy_shop import AstronomyShop
 from sregym.service.apps.blueprint_hotel_reservation import BlueprintHotelReservation
 from sregym.service.apps.fleet_cast import FleetCast
@@ -20,6 +21,8 @@ class AppRegistry:
             # "Train Ticket": TrainTicket
             "Fleet Cast": FleetCast,
             "Blueprint Hotel Reservation": BlueprintHotelReservation,
+            "Agentic RAG Platform": AgenticRAGPlatform,
+            "agentic-rag-platform": AgenticRAGPlatform,
         }
 
         self.APP_PATH = {
@@ -30,6 +33,8 @@ class AppRegistry:
             # "Train Ticket": TRAIN_TICKET_METADATA
             "Fleet Cast": FLEET_CAST_METADATA,  # noqa: F405
             "Blueprint Hotel Reservation": BLUEPRINT_HOTEL_RES_METADATA,  # noqa: F405
+            "Agentic RAG Platform": AGENTIC_RAG_PLATFORM_METADATA,  # noqa: F405
+            "agentic-rag-platform": AGENTIC_RAG_PLATFORM_METADATA,  # noqa: F405
         }
 
     def get_app_instance(self, app_name: str):
