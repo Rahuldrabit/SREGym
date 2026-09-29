@@ -22,12 +22,15 @@ class AgentRetryMetastableMitigationOracle(Oracle):
 
     FAILURE_CLASSES = {
         "traffic_did_not_recover": FailureClass.AGENT_ERROR,
+        "insufficient_traffic": FailureClass.AGENT_ERROR,
         "amplification_too_high": FailureClass.AGENT_ERROR,
         "branch_amplification_too_high": FailureClass.AGENT_ERROR,
         "queue_depth_too_high": FailureClass.AGENT_ERROR,
         "db_pool_waiting_not_zero": FailureClass.AGENT_ERROR,
         "p95_latency_too_high": FailureClass.AGENT_ERROR,
         "metrics_unreadable": FailureClass.ENVIRONMENT_ERROR,
+        "stability_test_failed": FailureClass.AGENT_ERROR,
+        "stability_test_exception": FailureClass.ENVIRONMENT_ERROR,
     }
 
     def __init__(
@@ -58,11 +61,23 @@ class AgentRetryMetastableMitigationOracle(Oracle):
         amp = snapshot.amplification_ratio
         queue_len = snapshot.backend_queue_depth
         db_waiting = snapshot.db_pool_waiting
+        goodput = getattr(snapshot, "goodput_rate", rate)
 
         print(
             f"[Health Probe] success={success:.1%} p95={p95:.2f}s "
-            f"amp={amp:.2f} queue={queue_len} db_waiting={db_waiting} rate={rate:.1f}req/s"
+            f"amp={amp:.2f} queue={queue_len} db_waiting={db_waiting} rate={rate:.1f}req/s goodput={goodput:.1f}req/s"
         )
+
+        # Useful work enforcement: scaling down pods to 0 or pausing traffic must fail
+        if snapshot.submitted < 20 or snapshot.completed < 10 or rate < 5.0 or goodput < 5.0:
+            return self.fail(
+                "insufficient_traffic",
+                submitted=snapshot.submitted,
+                completed=snapshot.completed,
+                rate=round(rate, 2),
+                goodput=round(goodput, 2),
+                error="Traffic rate or goodput too low; service may be scaled down or traffic stopped",
+            )
 
         if snapshot.completed > 0 and success < self.min_success_rate:
             return self.fail(
@@ -104,14 +119,6 @@ class AgentRetryMetastableMitigationOracle(Oracle):
                 "branch_amplification_too_high",
                 branch_amplification_ratio=round(branch_amp, 2),
                 maximum=self.max_amplification,
-            )
-
-        if snapshot.completed > 0 and rate < 5.0:
-            return self.fail(
-                "traffic_did_not_recover",
-                throughput=round(rate, 2),
-                required_minimum=5.0,
-                error="Traffic rate too low; service may be scaled down or traffic stopped",
             )
 
         return None
@@ -167,5 +174,5 @@ class AgentRetryMetastableMitigationOracle(Oracle):
             print("[PASS Phase 2] System absorbed transient disturbance and spontaneously self-recovered.")
             return {"success": True}
         except Exception as exc:
-            logger.warning(f"Stability pulse test encountered exception: {exc}")
-            return {"success": True}
+            logger.error(f"Stability pulse test encountered exception: {exc}")
+            return self.fail("stability_test_exception", error=str(exc))

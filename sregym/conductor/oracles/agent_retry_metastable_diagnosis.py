@@ -26,7 +26,7 @@ class AgentRetryMetastableDiagnosisOracle(Oracle):
         "missing_localization": FailureClass.AGENT_ERROR,
         "missing_trigger": FailureClass.AGENT_ERROR,
         "missing_sustaining_mechanism": FailureClass.AGENT_ERROR,
-        "missing_concurrency_impact": FailureClass.AGENT_ERROR,
+        "missing_impact": FailureClass.AGENT_ERROR,
     }
 
     DIMENSIONS = {
@@ -54,7 +54,6 @@ class AgentRetryMetastableDiagnosisOracle(Oracle):
                 r"\b(retr\w+)\b.*\b(planner|workflow|tool|transport|client)\b",
                 r"\b(retry storm|retry amplification|amplified requests)\b",
                 r"\b(orphan\w*|uncancel\w*|speculative|replacement)\b.*\b(work|task|operation|query|replan\w*)\b",
-                r"\b(lease|visibility timeout|redeliver\w*)\b",
             ],
             "keywords": [
                 "retry",

@@ -1,13 +1,13 @@
 """Problem implementation for agent_retry_metastable_overload.
 
 Category: Metastable Failure / Application + Distributed Systems
-Application: agentic-rag-platform
+Application: agentic-retry-platform
 
-Unlike conventional RPC retry storms, this scenario models compounded retries
-across autonomous workflow, tool-client, and transport layers. A transient
-backend degradation causes logical requests to expand into multiple correlated
-backend attempts, resulting in persistent overload after the initiating
-disturbance is removed.
+Unlike conventional RPC retry storms, this scenario models speculative replanning
+and uncancelled orphaned work compounded with multi-layer nested retries across
+autonomous workflow, tool-gateway, and data transport layers. A transient backend
+degradation causes logical requests to expand into multiple correlated backend attempts,
+resulting in persistent overload after the initiating disturbance is removed.
 """
 
 from __future__ import annotations
@@ -62,11 +62,11 @@ class AgentRetryMetastableOverload(Problem):
             description=(
                 "A transient backend slowdown caused the agent planner deadline to expire, launching "
                 "speculative replacement tool operations across generations without cancelling earlier in-flight "
-                "operations. Uncancelled orphaned work, queue lease expirations, and nested tool/transport retries "
+                "operations. Uncancelled orphaned work combined with nested tool and transport retries "
                 "saturated backend concurrency and connection pool capacity. Physical work remained trapped in a "
                 "self-sustaining metastable overload loop long after the initiating latency perturbation was removed. "
                 "The sustaining cause is the uncoordinated end-to-end retry policy lacking child cancellation, unified "
-                "retry budgets, and load shedding, not the expired backend slowdown."
+                "retry budgets, and proper timeout hierarchy, not the expired backend slowdown."
             ),
         )
 
@@ -156,16 +156,6 @@ class AgentRetryMetastableOverload(Problem):
             enable_backoff=True,
             shed_stale_queue=True,
         )
-        if hasattr(self.app, "kubectl") and self.app.kubectl is not None:
-            try:
-                self.app.kubectl.exec_command(
-                    f"kubectl set env deployment/agent-orchestrator PLANNER_MAX_RETRIES=1 -n {self.namespace}"
-                )
-                self.app.kubectl.exec_command(
-                    f"kubectl set env deployment/tool-gateway TOOL_MAX_RETRIES=1 HTTP_MAX_RETRIES=1 -n {self.namespace}"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to patch deployments during recover_fault: {e}")
         # Give time for queue to drain
         time.sleep(1.0)
 
