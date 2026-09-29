@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from sregym.conductor.oracles.agent_retry_metastable_diagnosis import AgentRetryMetastableDiagnosisOracle
 from sregym.conductor.oracles.agent_retry_metastable_mitigation import AgentRetryMetastableMitigationOracle
 from sregym.conductor.problems.base import Problem
-from sregym.generators.workload.agentic_workflow import AgenticWorkflowWorkload
-from sregym.service.apps.agentic_rag_platform import AgenticRAGPlatform
+from sregym.generators.workload.agentic_retry_workload import AgenticRetryWorkload
+from sregym.service.apps.agentic_retry_platform import AgenticRetryPlatform
 from sregym.utils.decorators import mark_fault_injected
 
 logger = logging.getLogger("all.conductor.problems.agent_retry_metastable_overload")
@@ -32,27 +33,26 @@ class AgentRetryMetastableOverload(Problem):
 
     base_rate = 10.0
     concurrency_limit = 25
-    normal_latency = 0.25
-    fault_latency = 1.5
+    normal_latency = 0.10
+    fault_latency = 1.50
     trigger_duration_seconds = 10.0
 
     baseline_warmup_seconds = 5.0
     post_fault_settle_seconds = 5.0
 
     def __init__(self):
-        super().__init__(app=AgenticRAGPlatform(embedded=True))
-        self.faulty_service = ["agent-workflow", "tool-service", "backend"]
-        self.workload = AgenticWorkflowWorkload(
+        super().__init__(app=AgenticRetryPlatform(embedded=False))
+        self.faulty_service = ["agent-orchestrator", "tool-gateway", "data-api"]
+        self.workload = AgenticRetryWorkload(
+            namespace=self.namespace,
             base_rate=self.base_rate,
             concurrency_limit=self.concurrency_limit,
             normal_latency=self.normal_latency,
             fault_latency=self.fault_latency,
-            transport_timeout=0.6,
-            tool_timeout=1.4,
-            planner_timeout=3.5,
-            transport_max_retries=2,
-            tool_max_retries=2,
+            trigger_duration_seconds=self.trigger_duration_seconds,
             planner_max_retries=3,
+            tool_max_retries=2,
+            transport_max_retries=2,
         )
         self.app.workload = self.workload
 
@@ -60,12 +60,13 @@ class AgentRetryMetastableOverload(Problem):
             component="agent-workflow/retry-policy",
             namespace=self.namespace,
             description=(
-                "A transient backend latency spike triggered retries independently across transport, "
-                "tool-client, and agent-planner layers. The compounded attempts (up to 12x per logical request) "
-                "saturated backend concurrency and queue capacity. Queued and retried work continued after the "
-                "initiating latency fault was removed, locking the system in a self-sustaining metastable overload loop. "
-                "The sustaining cause is the uncoordinated stacked retry policies lacking a unified retry budget, "
-                "backoff, and load shedding, not the expired backend slowdown."
+                "A transient backend slowdown caused the agent planner deadline to expire, launching "
+                "speculative replacement tool operations across generations without cancelling earlier in-flight "
+                "operations. Uncancelled orphaned work, queue lease expirations, and nested tool/transport retries "
+                "saturated backend concurrency and connection pool capacity. Physical work remained trapped in a "
+                "self-sustaining metastable overload loop long after the initiating latency perturbation was removed. "
+                "The sustaining cause is the uncoordinated end-to-end retry policy lacking child cancellation, unified "
+                "retry budgets, and load shedding, not the expired backend slowdown."
             ),
         )
 
@@ -155,6 +156,16 @@ class AgentRetryMetastableOverload(Problem):
             enable_backoff=True,
             shed_stale_queue=True,
         )
+        if hasattr(self.app, "kubectl") and self.app.kubectl is not None:
+            try:
+                self.app.kubectl.exec_command(
+                    f"kubectl set env deployment/agent-orchestrator PLANNER_MAX_RETRIES=1 -n {self.namespace}"
+                )
+                self.app.kubectl.exec_command(
+                    f"kubectl set env deployment/tool-gateway TOOL_MAX_RETRIES=1 HTTP_MAX_RETRIES=1 -n {self.namespace}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to patch deployments during recover_fault: {e}")
         # Give time for queue to drain
         time.sleep(1.0)
 
@@ -168,7 +179,8 @@ class AgentRetryMetastableOverload(Problem):
         perturbation ends, demonstrating that the uncoordinated retry policy is causal.
         """
         print("== Negative Control: Single Unified Retry Layer ==")
-        control_workload = AgenticWorkflowWorkload(
+        control_workload = AgenticRetryWorkload(
+            namespace=self.namespace,
             base_rate=self.base_rate,
             concurrency_limit=self.concurrency_limit,
             normal_latency=self.normal_latency,

@@ -30,6 +30,7 @@ FLIGHT_TICKET_METADATA = BASE_DIR / "service" / "metadata" / "flight-ticket.json
 FLEET_CAST_METADATA = BASE_DIR / "service" / "metadata" / "fleet-cast.json"
 BLUEPRINT_HOTEL_RES_METADATA = BASE_DIR / "service" / "metadata" / "blueprint-hotel-reservation.json"
 AGENTIC_RAG_PLATFORM_METADATA = BASE_DIR / "service" / "metadata" / "agentic-rag-platform.json"
+AGENTIC_RETRY_PLATFORM_METADATA = BASE_DIR / "service" / "metadata" / "agentic-retry-platform.json"
 
 # Khaos DaemonSet
 KHAOS_DS = BASE_DIR / "service" / "khaos.yaml"

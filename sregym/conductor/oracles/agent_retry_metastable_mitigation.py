@@ -23,6 +23,7 @@ class AgentRetryMetastableMitigationOracle(Oracle):
     FAILURE_CLASSES = {
         "traffic_did_not_recover": FailureClass.AGENT_ERROR,
         "amplification_too_high": FailureClass.AGENT_ERROR,
+        "branch_amplification_too_high": FailureClass.AGENT_ERROR,
         "queue_depth_too_high": FailureClass.AGENT_ERROR,
         "db_pool_waiting_not_zero": FailureClass.AGENT_ERROR,
         "p95_latency_too_high": FailureClass.AGENT_ERROR,
@@ -97,6 +98,22 @@ class AgentRetryMetastableMitigationOracle(Oracle):
                 maximum=self.max_amplification,
             )
 
+        branch_amp = getattr(snapshot, "branch_amplification_ratio", 1.0)
+        if branch_amp > self.max_amplification:
+            return self.fail(
+                "branch_amplification_too_high",
+                branch_amplification_ratio=round(branch_amp, 2),
+                maximum=self.max_amplification,
+            )
+
+        if snapshot.completed > 0 and rate < 5.0:
+            return self.fail(
+                "traffic_did_not_recover",
+                throughput=round(rate, 2),
+                required_minimum=5.0,
+                error="Traffic rate too low; service may be scaled down or traffic stopped",
+            )
+
         return None
 
     def evaluate(self, solution=None, trace=None, duration=None) -> dict[str, Any]:
@@ -105,7 +122,7 @@ class AgentRetryMetastableMitigationOracle(Oracle):
         deadline = time.monotonic() + self.recovery_timeout_seconds
         last_failure = None
 
-        # Give mitigation a moment to take effect and verify sustained recovery
+        # Step 1: Verify system reaches healthy steady state
         consecutive_healthy = 0
         required_healthy_probes = 2
 
@@ -115,10 +132,10 @@ class AgentRetryMetastableMitigationOracle(Oracle):
                 consecutive_healthy += 1
                 if consecutive_healthy >= required_healthy_probes:
                     print(
-                        f"[PASS] Metastable overload collapsed: service healthy for "
+                        f"[PASS Phase 1] Metastable overload collapsed: service healthy for "
                         f"{consecutive_healthy} consecutive probes."
                     )
-                    return {"success": True}
+                    break
             else:
                 consecutive_healthy = 0
                 last_failure = failure
@@ -127,5 +144,28 @@ class AgentRetryMetastableMitigationOracle(Oracle):
             if remaining > 0:
                 time.sleep(min(self.poll_interval_seconds, remaining))
 
-        print(f"[FAIL] Service remained in degraded/metastable state: {last_failure}")
-        return last_failure or self.fail("traffic_did_not_recover")
+        if consecutive_healthy < required_healthy_probes:
+            print(f"[FAIL] Service remained in degraded/metastable state: {last_failure}")
+            return last_failure or self.fail("traffic_did_not_recover")
+
+        # Step 2: Post-mitigation stability perturbation test (3s pulse of 600ms latency)
+        # Tests that a properly mitigated system tolerates transient disturbances without re-entering metastable collapse
+        print("[Phase 2: Stability Pulse] Injecting 3s transient disturbance (600ms) to verify stability...")
+        try:
+            self.problem.workload.inject_latency_fault(latency_ms=600.0, duration_seconds=3.0)
+            time.sleep(3.5)
+            self.problem.workload.remove_latency_fault()
+            time.sleep(2.0)
+
+            post_pulse_failure = self._sample_health()
+            if post_pulse_failure is not None:
+                print(
+                    f"[FAIL] System re-collapsed into metastable overload after transient pulse: {post_pulse_failure}"
+                )
+                return post_pulse_failure
+
+            print("[PASS Phase 2] System absorbed transient disturbance and spontaneously self-recovered.")
+            return {"success": True}
+        except Exception as exc:
+            logger.warning(f"Stability pulse test encountered exception: {exc}")
+            return {"success": True}

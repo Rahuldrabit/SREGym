@@ -7,5 +7,11 @@
         "Call retrieval and SQL/API tools",
         "Query backend data store",
         "Emulate stacked transport, tool, and planner retries"
-    ]
+    ],
+    "Helm Config": {
+        "release_name": "agentic-rag-platform",
+        "chart_path": "agentic-rag-platform/helm-chart/agentic-rag-platform",
+        "namespace": "agentic-rag-platform"
+    },
+    "K8S Deploy Path": "agentic-rag-platform/kubernetes"
 }

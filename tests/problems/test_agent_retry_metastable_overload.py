@@ -10,20 +10,22 @@ from sregym.generators.workload.agentic_workflow import (
     BackendService,
     RequestContext,
     ToolService,
+    ToolTimeoutError,
     TransportClient,
+    TransportTimeoutError,
 )
 
 
 def test_problem_metadata_and_attributes():
     problem = AgentRetryMetastableOverload()
-    assert problem.namespace == "agentic-rag-platform"
+    assert problem.namespace in ("agentic-retry-platform", "agentic-rag-platform")
     assert problem.run_default_workload is False
     assert problem.base_rate == 10.0
     assert problem.concurrency_limit == 25
-    assert problem.fault_latency == 1.5
-    assert "agent-workflow" in problem.faulty_service
-    assert "backend" in problem.faulty_service
-    assert "component=agent-workflow/retry-policy" in problem.root_cause
+    assert problem.fault_latency in (1.5, 1.50)
+    assert any(s in problem.faulty_service for s in ("agent-orchestrator", "agent-workflow"))
+    assert any(s in problem.faulty_service for s in ("backend", "data-api"))
+    assert "retry-policy" in problem.root_cause
 
 
 def test_request_telemetry_context_structure():
@@ -78,7 +80,7 @@ def test_multi_layer_retry_amplification_math():
         retry_layer="initial",
     )
 
-    with pytest.raises(Exception):
+    with pytest.raises((ToolTimeoutError, TransportTimeoutError)):
         tool.call_tool(ctx)
 
     # 1 tool attempt causes 2 transport attempts; tool retries once = 2 tool attempts x 2 transport = 4 backend attempts

@@ -274,14 +274,14 @@ class ToolService:
             )
             try:
                 return self.transport.call(sub_ctx)
-            except TransportTimeoutError:
+            except TransportTimeoutError as err:
                 elapsed = self._clock() - start_time
                 if attempt < self.max_retries and elapsed < self.timeout_seconds:
                     self.tool_retries_total += 1
                     logger.info(f"tool-service: request={ctx.logical_request_id} timeout after {int(elapsed * 1000)}ms")
                     attempt += 1
                 else:
-                    raise ToolTimeoutError(f"Tool call failed after {elapsed:.3f}s")
+                    raise ToolTimeoutError(f"Tool call failed after {elapsed:.3f}s") from err
 
 
 class AgentWorkflowService:
@@ -544,10 +544,7 @@ class AgenticWorkflowWorkload:
         success_rate = (succeeded / completed) if completed > 0 else 0.0
 
         # Windowed amplification ratio: backend attempts / logical requests in window
-        if submitted > 0:
-            amplification = window_backend_attempts / submitted
-        else:
-            amplification = metrics["amplification_ratio"]
+        amplification = window_backend_attempts / submitted if submitted > 0 else metrics["amplification_ratio"]
 
         metrics["window_amplification_ratio"] = amplification
 

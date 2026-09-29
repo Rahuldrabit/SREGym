@@ -1,22 +1,22 @@
-"""Interface to the Agentic RAG Platform application."""
+"""Interface to the Agentic Retry Platform application."""
 
 from __future__ import annotations
 
 import logging
 
-from sregym.paths import AGENTIC_RAG_PLATFORM_METADATA
+from sregym.paths import AGENTIC_RETRY_PLATFORM_METADATA
 from sregym.service.apps.base import Application
 from sregym.service.helm import Helm
 from sregym.service.kubectl import KubeCtl
 
-logger = logging.getLogger("all.application.agentic_rag_platform")
+logger = logging.getLogger("all.application.agentic_retry_platform")
 
 
-class AgenticRAGPlatform(Application):
-    """Application representation for Agentic RAG Platform."""
+class AgenticRetryPlatform(Application):
+    """Application representation for Agentic Retry Platform."""
 
     def __init__(self, embedded: bool = True):
-        super().__init__(str(AGENTIC_RAG_PLATFORM_METADATA))
+        super().__init__(str(AGENTIC_RETRY_PLATFORM_METADATA))
         self.load_app_json()
         self.embedded = embedded
         self.kubectl = None
@@ -29,7 +29,7 @@ class AgenticRAGPlatform(Application):
         self.workload = None
 
     def deploy(self):
-        """Deploy application components (in-process or cluster)."""
+        """Deploy application components on Kubernetes cluster."""
         logger.info(f"Deploying {self.name} in namespace {self.namespace} (embedded={self.embedded})")
         if self.kubectl is None:
             try:
@@ -54,6 +54,6 @@ class AgenticRAGPlatform(Application):
         return (
             f"App Name: {self.name}\n"
             f"Namespace: {self.namespace}\n"
-            f"Description: Autonomous Agentic RAG Platform with multi-layer retries across "
-            f"workflow supervisor, tool client, and transport layers hitting a concurrency-bound backend."
+            f"Description: Autonomous Agentic Retry Platform with multi-layer retries across "
+            f"agent orchestrator, tool gateway, and transport layers targeting PgBouncer and PostgreSQL."
         )
