@@ -514,17 +514,25 @@ fences, no preamble, no commentary.
         # Strip markdown fences
         clean = re.sub(r"```(?:json)?\s*|\s*```", "", response_text).strip()
 
-        # Sometimes the model emits chain-of-thought text before the JSON array.
-        # Try to find the outermost JSON array.
-        bracket_start = clean.find("[")
-        bracket_end = clean.rfind("]")
-        if bracket_start != -1 and bracket_end != -1 and bracket_end > bracket_start:
-            clean = clean[bracket_start : bracket_end + 1]
-
-        try:
-            data = json.loads(clean)
-        except json.JSONDecodeError as exc:
-            raise ChecklistParseError(f"Invalid JSON: {exc}") from exc
+        # Models sometimes put reasoning or a second candidate after the JSON
+        # array.  Pairing the first `[` with the last `]` makes that valid
+        # response fail with ``Extra data``.  Decode the first complete JSON
+        # value instead, while still allowing prose before it.
+        data = None
+        last_error: json.JSONDecodeError | None = None
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\[", clean):
+            try:
+                candidate, _ = decoder.raw_decode(clean[match.start() :])
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                continue
+            if isinstance(candidate, list):
+                data = candidate
+                break
+        if data is None:
+            detail = last_error or json.JSONDecodeError("No JSON array found", clean, 0)
+            raise ChecklistParseError(f"Invalid JSON: {detail}") from detail
 
         if not isinstance(data, list):
             raise ChecklistParseError("Response is not a JSON array")
