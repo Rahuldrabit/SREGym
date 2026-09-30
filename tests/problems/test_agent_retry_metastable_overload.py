@@ -35,7 +35,7 @@ def test_workload_healthy_baseline_metrics():
         assert snapshot.success_rate >= 0.90
         assert snapshot.amplification_ratio <= 1.3
         assert snapshot.backend_queue_depth == 0
-        assert snapshot.db_pool_waiting == 0
+        assert snapshot.backend_waiting_requests == 0
     finally:
         workload.stop()
 

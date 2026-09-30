@@ -31,7 +31,7 @@ def test_mitigation_oracle_passes_when_healthy():
         p95_latency_seconds=0.25,
         amplification_ratio=1.05,
         backend_queue_depth=0,
-        db_pool_waiting=0,
+        backend_waiting_requests=0,
         backend_active_requests=2,
         goodput_rate=10.0,
     )
@@ -64,7 +64,7 @@ def test_mitigation_oracle_fails_when_traffic_degraded():
         p95_latency_seconds=0.25,
         amplification_ratio=1.0,
         backend_queue_depth=0,
-        db_pool_waiting=0,
+        backend_waiting_requests=0,
         backend_active_requests=2,
         goodput_rate=4.0,
     )
@@ -95,7 +95,7 @@ def test_mitigation_oracle_fails_when_traffic_insufficient():
         p95_latency_seconds=0.1,
         amplification_ratio=1.0,
         backend_queue_depth=0,
-        db_pool_waiting=0,
+        backend_waiting_requests=0,
         backend_active_requests=0,
         goodput_rate=1.0,
     )
@@ -125,7 +125,7 @@ def test_mitigation_oracle_fails_when_stability_test_crashes():
         p95_latency_seconds=0.25,
         amplification_ratio=1.05,
         backend_queue_depth=0,
-        db_pool_waiting=0,
+        backend_waiting_requests=0,
         backend_active_requests=2,
         goodput_rate=10.0,
     )

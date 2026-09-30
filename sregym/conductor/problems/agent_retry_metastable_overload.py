@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
 
 from sregym.conductor.oracles.agent_retry_metastable_diagnosis import AgentRetryMetastableDiagnosisOracle
 from sregym.conductor.oracles.agent_retry_metastable_mitigation import AgentRetryMetastableMitigationOracle
@@ -66,7 +65,7 @@ class AgentRetryMetastableOverload(Problem):
                 "saturated backend concurrency and connection pool capacity. Physical work remained trapped in a "
                 "self-sustaining metastable overload loop long after the initiating latency perturbation was removed. "
                 "The sustaining cause is the uncoordinated end-to-end retry policy lacking child cancellation, unified "
-                "retry budgets, and proper timeout hierarchy, not the expired backend slowdown."
+                "retry budgets, and deadline/cancellation propagation, not the expired backend slowdown."
             ),
         )
 
@@ -161,54 +160,6 @@ class AgentRetryMetastableOverload(Problem):
 
     def stop_workload(self):
         self.workload.stop()
-
-    def run_negative_control(self) -> dict[str, Any]:
-        """Execute negative control: identical perturbation with capped retries (R_planner=1, unified budget).
-
-        Proves that without stacked planner replanning, the system quickly self-recovers after the
-        perturbation ends, demonstrating that the uncoordinated retry policy is causal.
-        """
-        print("== Negative Control: Single Unified Retry Layer ==")
-        control_workload = AgenticRetryWorkload(
-            namespace=self.namespace,
-            base_rate=self.base_rate,
-            concurrency_limit=self.concurrency_limit,
-            normal_latency=self.normal_latency,
-            fault_latency=self.fault_latency,
-            planner_max_retries=1,  # R_planner = 0 replans
-            tool_max_retries=1,
-            transport_max_retries=2,
-        )
-        control_workload.start()
-        try:
-            time.sleep(self.baseline_warmup_seconds)
-            baseline = control_workload.snapshot(self.baseline_warmup_seconds)
-
-            control_workload.inject_latency_fault()
-            time.sleep(self.trigger_duration_seconds)
-            control_workload.remove_latency_fault()
-
-            time.sleep(self.post_fault_settle_seconds)
-            post_trigger = control_workload.snapshot(self.post_fault_settle_seconds)
-
-            recovered = (
-                post_trigger.success_rate >= 0.90
-                and post_trigger.amplification_ratio <= 1.5
-                and post_trigger.backend_queue_depth <= 5
-            )
-            print(
-                f"[Negative Control Result] recovered={recovered} "
-                f"post_success={post_trigger.success_rate:.1%} "
-                f"post_amp={post_trigger.amplification_ratio:.2f} "
-                f"post_queue={post_trigger.backend_queue_depth}"
-            )
-            return {
-                "recovered": recovered,
-                "baseline": baseline,
-                "post_trigger": post_trigger,
-            }
-        finally:
-            control_workload.stop()
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ class AgentRetryMetastableMitigationOracle(Oracle):
         "amplification_too_high": FailureClass.AGENT_ERROR,
         "branch_amplification_too_high": FailureClass.AGENT_ERROR,
         "queue_depth_too_high": FailureClass.AGENT_ERROR,
-        "db_pool_waiting_not_zero": FailureClass.AGENT_ERROR,
+        "backend_waiting_not_zero": FailureClass.AGENT_ERROR,
         "p95_latency_too_high": FailureClass.AGENT_ERROR,
         "metrics_unreadable": FailureClass.ENVIRONMENT_ERROR,
         "stability_test_failed": FailureClass.AGENT_ERROR,
@@ -60,12 +60,12 @@ class AgentRetryMetastableMitigationOracle(Oracle):
         p95 = snapshot.p95_latency_seconds
         amp = snapshot.amplification_ratio
         queue_len = snapshot.backend_queue_depth
-        db_waiting = snapshot.db_pool_waiting
+        backend_waiting = snapshot.backend_waiting_requests
         goodput = getattr(snapshot, "goodput_rate", rate)
 
         print(
             f"[Health Probe] success={success:.1%} p95={p95:.2f}s "
-            f"amp={amp:.2f} queue={queue_len} db_waiting={db_waiting} rate={rate:.1f}req/s goodput={goodput:.1f}req/s"
+            f"amp={amp:.2f} queue={queue_len} backend_waiting={backend_waiting} rate={rate:.1f}req/s goodput={goodput:.1f}req/s"
         )
 
         # Useful work enforcement: scaling down pods to 0 or pausing traffic must fail
@@ -100,10 +100,10 @@ class AgentRetryMetastableMitigationOracle(Oracle):
                 maximum=self.max_queue_depth,
             )
 
-        if db_waiting > 0:
+        if backend_waiting > 0:
             return self.fail(
-                "db_pool_waiting_not_zero",
-                db_pool_waiting=db_waiting,
+                "backend_waiting_not_zero",
+                backend_waiting_requests=backend_waiting,
             )
 
         if amp > self.max_amplification:
@@ -162,7 +162,9 @@ class AgentRetryMetastableMitigationOracle(Oracle):
             self.problem.workload.inject_latency_fault(latency_ms=600.0, duration_seconds=3.0)
             time.sleep(3.5)
             self.problem.workload.remove_latency_fault()
-            time.sleep(2.0)
+            # The pulse itself must not contribute to the recovery score.
+            self.problem.workload.reset_metric_baseline()
+            time.sleep(self.sample_seconds)
 
             post_pulse_failure = self._sample_health()
             if post_pulse_failure is not None:

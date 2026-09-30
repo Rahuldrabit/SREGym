@@ -104,7 +104,7 @@ class WorkloadSnapshot:
     p95_latency_seconds: float
     amplification_ratio: float
     backend_queue_depth: int
-    db_pool_waiting: int
+    backend_waiting_requests: int
     backend_active_requests: int
     branch_amplification_ratio: float = 1.0
     goodput_rate: float = 10.0
@@ -171,9 +171,10 @@ class AgenticRetryWorkload:
         if self._running:
             return
         self._running = True
-        self.orchestrator_forward.start()
-        self.gateway_forward.start()
-        self.data_api_forward.start()
+        if not self.test_mode:
+            self.orchestrator_forward.start()
+            self.gateway_forward.start()
+            self.data_api_forward.start()
 
         self._worker_thread = threading.Thread(target=self._run_loop, daemon=True)
         self._worker_thread.start()
@@ -288,53 +289,71 @@ class AgenticRetryWorkload:
         self._fault_triggered = False
         self._mitigation_applied = True
 
-        # Patch agentic-retry-policy ConfigMap on cluster
-        with contextlib.suppress(Exception):
-            policy_patch = json.dumps(
-                {
-                    "data": {
-                        "policy.json": json.dumps(
-                            {
-                                "workflow": {
-                                    "timeout_ms": 2500,
-                                    "max_attempts": cap_planner_retries,
-                                    "max_inflight": 25,
-                                    "cancel_children_on_timeout": enable_cancellation,
-                                },
-                                "tool": {
-                                    "timeout_ms": 1000,
-                                    "max_attempts": 1 if disable_nested_retries else 2,
-                                },
-                                "transport": {
-                                    "timeout_ms": 600,
-                                    "max_attempts": 1 if disable_nested_retries else 2,
-                                },
-                                "retry_budget": {
-                                    "enabled": enable_retry_budget,
-                                    "max_physical_attempts_per_workflow": 4,
-                                },
-                            }
-                        )
-                    }
-                }
+        policy = {
+            "workflow": {
+                "timeout_ms": 2500,
+                "max_attempts": cap_planner_retries,
+                "max_inflight": 25,
+                "cancel_children_on_timeout": enable_cancellation,
+            },
+            "tool": {"timeout_ms": 1000, "max_attempts": 1 if disable_nested_retries else 2},
+            "transport": {"timeout_ms": 600, "max_attempts": 1 if disable_nested_retries else 2},
+            "retry_budget": {"enabled": enable_retry_budget, "max_physical_attempts_per_workflow": 4},
+        }
+        if self.test_mode:
+            return
+
+        patch = json.dumps({"data": {"policy.json": json.dumps(policy)}})
+        subprocess.run(
+            [
+                "kubectl",
+                "patch",
+                "configmap",
+                "agentic-retry-policy",
+                "-n",
+                self.namespace,
+                "--type",
+                "merge",
+                "-p",
+                patch,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        # Projected ConfigMaps update asynchronously. Restart the consumers so the
+        # policy boundary is deterministic, then prove both live services read it.
+        for deployment in ("agent-orchestrator", "tool-gateway"):
+            subprocess.run(
+                ["kubectl", "rollout", "restart", f"deployment/{deployment}", "-n", self.namespace],
+                capture_output=True,
+                text=True,
+                check=True,
             )
             subprocess.run(
-                [
-                    "kubectl",
-                    "patch",
-                    "configmap",
-                    "agentic-retry-policy",
-                    "-n",
-                    self.namespace,
-                    "--type",
-                    "merge",
-                    "-p",
-                    policy_patch,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
+                ["kubectl", "rollout", "status", f"deployment/{deployment}", "-n", self.namespace, "--timeout=90s"],
+                capture_output=True,
+                text=True,
+                check=True,
             )
+
+        for forward in (self.orchestrator_forward, self.gateway_forward):
+            # A service port-forward chooses one endpoint when it starts. It can
+            # remain connected to a terminating pre-rollout pod, so recreate it
+            # before using /config as evidence of the new policy.
+            forward.stop()
+            port = forward.start()
+            request = urllib.request.Request(f"http://127.0.0.1:{port}/config")
+            with urllib.request.urlopen(request, timeout=3.0) as response:
+                observed = json.loads(response.read().decode("utf-8"))
+            if observed != policy:
+                raise RuntimeError(f"Live retry policy did not converge after rollout: {observed}")
+        self.reset_metric_baseline()
+
+    def reset_metric_baseline(self):
+        """Discard pre-change counters before scoring a new observation window."""
+        self._metric_baseline_initialized = False
+        self._last_snapshot_time = time.time()
 
     def _scrape_prometheus_metrics(self, port: int) -> dict[str, float]:
         """Scrapes and parses Prometheus metrics format from live endpoint."""
@@ -404,7 +423,7 @@ class AgenticRetryWorkload:
                         "backend_requests_total",
                         "backend_waiting_requests",
                         "backend_active_requests",
-                        "pgbouncer_waiting_clients",
+                        "data_api_waiting_requests",
                         "orphaned_operations_active",
                     },
                 ),
@@ -444,7 +463,7 @@ class AgenticRetryWorkload:
             goodput_rate = delta_goodput / elapsed_delta
 
             queue_depth = int(data_metrics.get("backend_waiting_requests", 0))
-            db_pool_waiting = int(data_metrics["pgbouncer_waiting_clients"])
+            backend_waiting_requests = int(data_metrics["data_api_waiting_requests"])
             active_workers = int(data_metrics["backend_active_requests"])
             orphaned = int(data_metrics["orphaned_operations_active"])
 
@@ -460,7 +479,7 @@ class AgenticRetryWorkload:
                 p95_latency_seconds=p95,
                 amplification_ratio=amp_ratio,
                 backend_queue_depth=queue_depth,
-                db_pool_waiting=db_pool_waiting,
+                backend_waiting_requests=backend_waiting_requests,
                 backend_active_requests=active_workers,
                 branch_amplification_ratio=branch_amp,
                 goodput_rate=goodput_rate,
@@ -469,7 +488,7 @@ class AgenticRetryWorkload:
                     "amplification_ratio": amp_ratio,
                     "branch_amplification_ratio": branch_amp,
                     "queue_depth": queue_depth,
-                    "db_pool_waiting": db_pool_waiting,
+                    "backend_waiting_requests": backend_waiting_requests,
                     "active_workers": active_workers,
                     "goodput_rate": goodput_rate,
                     "orphaned_operations": orphaned,
@@ -497,7 +516,7 @@ class AgenticRetryWorkload:
             p95_latency_seconds=p95,
             amplification_ratio=amp_ratio,
             backend_queue_depth=queue_depth,
-            db_pool_waiting=db_waiting,
+            backend_waiting_requests=db_waiting,
             backend_active_requests=active_workers,
             branch_amplification_ratio=branch_amp,
             goodput_rate=goodput,
@@ -506,7 +525,7 @@ class AgenticRetryWorkload:
                 "amplification_ratio": amp_ratio,
                 "branch_amplification_ratio": branch_amp,
                 "queue_depth": queue_depth,
-                "db_pool_waiting": db_waiting,
+                "backend_waiting_requests": db_waiting,
                 "active_workers": active_workers,
                 "goodput_rate": goodput,
                 "orphaned_operations": orphaned,
