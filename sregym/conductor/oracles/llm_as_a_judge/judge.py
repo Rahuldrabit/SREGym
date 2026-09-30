@@ -519,6 +519,7 @@ fences, no preamble, no commentary.
         # response fail with ``Extra data``.  Decode the first complete JSON
         # value instead, while still allowing prose before it.
         data = None
+        candidates: list[list] = []
         last_error: json.JSONDecodeError | None = None
         decoder = json.JSONDecoder()
         for match in re.finditer(r"\[", clean):
@@ -528,8 +529,23 @@ fences, no preamble, no commentary.
                 last_error = exc
                 continue
             if isinstance(candidate, list):
-                data = candidate
-                break
+                candidates.append(candidate)
+                received_ids = {item.get("id") for item in candidate if isinstance(item, dict)}
+                if set(expected_question_ids).issubset(received_ids):
+                    data = candidate
+                    break
+        if data is None and candidates:
+            # Some providers emit one JSON array per item. Merge those arrays
+            # when their question IDs together form the complete checklist.
+            merged = {}
+            for candidate in candidates:
+                for item in candidate:
+                    if isinstance(item, dict) and item.get("id") in expected_question_ids:
+                        merged.setdefault(item["id"], item)
+            if set(expected_question_ids).issubset(merged):
+                data = [merged[qid] for qid in expected_question_ids]
+            else:
+                data = max(candidates, key=len)
         if data is None:
             detail = last_error or json.JSONDecodeError("No JSON array found", clean, 0)
             raise ChecklistParseError(f"Invalid JSON: {detail}") from detail

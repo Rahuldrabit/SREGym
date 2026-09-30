@@ -27,6 +27,11 @@ def test_parser_accepts_reasoning_before_fenced_json_array():
     assert DiagnosisJudge._parse_response(payload, EXPECTED_IDS) == _response()
 
 
+def test_parser_merges_concatenated_single_question_arrays():
+    payload = "\n".join(json.dumps([item]) for item in _response())
+    assert DiagnosisJudge._parse_response(payload, EXPECTED_IDS) == _response()
+
+
 def test_parser_still_rejects_missing_questions():
     with pytest.raises(ChecklistParseError, match="Missing"):
         DiagnosisJudge._parse_response(json.dumps(_response()[:1]), EXPECTED_IDS)
