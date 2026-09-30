@@ -514,46 +514,45 @@ fences, no preamble, no commentary.
         # Strip markdown fences
         clean = re.sub(r"```(?:json)?\s*|\s*```", "", response_text).strip()
 
-        # Models sometimes put reasoning or a second candidate after the JSON
-        # array.  Pairing the first `[` with the last `]` makes that valid
-        # response fail with ``Extra data``.  Decode the first complete JSON
-        # value instead, while still allowing prose before it.
-        data = None
+        expected_ids = set(expected_question_ids)
+        decoder = json.JSONDecoder()
+
+        # Models may emit prose, bracketed reasoning, or another candidate
+        # before/after the requested checklist. Decode complete JSON arrays
+        # independently instead of pairing the first "[" with the last "]".
         candidates: list[list] = []
         last_error: json.JSONDecodeError | None = None
-        decoder = json.JSONDecoder()
+        data = None
+
         for match in re.finditer(r"\[", clean):
             try:
                 candidate, _ = decoder.raw_decode(clean[match.start() :])
             except json.JSONDecodeError as exc:
                 last_error = exc
                 continue
-            if isinstance(candidate, list):
-                candidates.append(candidate)
-                received_ids = {item.get("id") for item in candidate if isinstance(item, dict)}
-                if set(expected_question_ids).issubset(received_ids):
-                    data = candidate
-                    break
+            if not isinstance(candidate, list):
+                continue
+
+            candidates.append(candidate)
+            received_ids = {item.get("id") for item in candidate if isinstance(item, dict)}
+            if expected_ids.issubset(received_ids):
+                data = candidate
+                break
+
         if data is None and candidates:
-            # Some providers emit one JSON array per item. Merge those arrays
-            # when their question IDs together form the complete checklist.
-            merged = {}
-            for candidate in candidates:
-                for item in candidate:
-                    if isinstance(item, dict) and item.get("id") in expected_question_ids:
-                        merged.setdefault(item["id"], item)
-            if set(expected_question_ids).issubset(merged):
-                data = [merged[qid] for qid in expected_question_ids]
-            else:
-                data = max(candidates, key=len)
+            # Preserve missing-question retry semantics without combining
+            # separate, malformed model responses.
+            def relevance(candidate: list) -> int:
+                received_ids = {item.get("id") for item in candidate if isinstance(item, dict)}
+                return len(expected_ids & received_ids)
+
+            data = max(candidates, key=relevance)
+
         if data is None:
-            detail = last_error or json.JSONDecodeError("No JSON array found", clean, 0)
-            raise ChecklistParseError(f"Invalid JSON: {detail}") from detail
+            if last_error is not None:
+                raise ChecklistParseError(f"Invalid JSON: {last_error}") from last_error
+            raise ChecklistParseError("Invalid JSON: no JSON array found")
 
-        if not isinstance(data, list):
-            raise ChecklistParseError("Response is not a JSON array")
-
-        expected_ids = set(expected_question_ids)
         num_expected = len(expected_ids)
         received_ids = {item.get("id") for item in data if isinstance(item, dict)}
 

@@ -17,21 +17,35 @@ def _response():
     ]
 
 
-def test_parser_accepts_reasoning_after_json_array():
-    payload = json.dumps(_response()) + "\n\nThe JSON above is my final answer."
+def test_parser_accepts_valid_json_array():
+    payload = json.dumps(_response())
     assert DiagnosisJudge._parse_response(payload, EXPECTED_IDS) == _response()
 
 
-def test_parser_accepts_reasoning_before_fenced_json_array():
+def test_parser_accepts_fenced_json_with_preamble():
     payload = "I checked the evidence first.\n```json\n" + json.dumps(_response()) + "\n```"
     assert DiagnosisJudge._parse_response(payload, EXPECTED_IDS) == _response()
 
 
-def test_parser_merges_concatenated_single_question_arrays():
-    payload = "\n".join(json.dumps([item]) for item in _response())
+def test_parser_accepts_complete_array_before_second_candidate():
+    payload = json.dumps(_response()) + "\n\nAlternative candidate:\n" + json.dumps(_response()[:1])
     assert DiagnosisJudge._parse_response(payload, EXPECTED_IDS) == _response()
 
 
-def test_parser_still_rejects_missing_questions():
+def test_parser_ignores_bracketed_preamble():
+    payload = "Reasoning [not JSON]\n" + json.dumps(_response())
+    assert DiagnosisJudge._parse_response(payload, EXPECTED_IDS) == _response()
+
+
+def test_parser_rejects_missing_questions():
+    payload = json.dumps(_response()[:1])
+
     with pytest.raises(ChecklistParseError, match="Missing"):
-        DiagnosisJudge._parse_response(json.dumps(_response()[:1]), EXPECTED_IDS)
+        DiagnosisJudge._parse_response(payload, EXPECTED_IDS)
+
+
+def test_parser_does_not_merge_separate_partial_arrays():
+    payload = "\n".join(json.dumps([item]) for item in _response())
+
+    with pytest.raises(ChecklistParseError, match="Missing"):
+        DiagnosisJudge._parse_response(payload, EXPECTED_IDS)
