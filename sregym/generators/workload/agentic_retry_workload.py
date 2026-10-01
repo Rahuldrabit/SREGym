@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import socket
 import subprocess
 import threading
 import time
@@ -17,80 +16,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
+from sregym.generators.workload.k8s_port_forward import KubectlPortForward
+
 logger = logging.getLogger("all.infra.agentic_retry_workload")
-
-
-class KubectlPortForward:
-    """Maintains a localhost tunnel to a Kubernetes Service."""
-
-    def __init__(self, namespace: str, service: str, remote_port: int):
-        self.namespace = namespace
-        self.service = service
-        self.remote_port = remote_port
-        self.local_port: int | None = None
-        self.process: subprocess.Popen | None = None
-        self._lock = threading.Lock()
-
-    @staticmethod
-    def _free_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            return int(sock.getsockname()[1])
-
-    def _healthy(self) -> bool:
-        if self.process is None or self.process.poll() is not None or self.local_port is None:
-            return False
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.5)
-            return sock.connect_ex(("127.0.0.1", self.local_port)) == 0
-
-    def start(self, timeout: float = 25.0) -> int:
-        with self._lock:
-            if self._healthy():
-                return int(self.local_port)
-            self.stop()
-            self.local_port = self._free_port()
-            try:
-                self.process = subprocess.Popen(
-                    [
-                        "kubectl",
-                        "port-forward",
-                        f"service/{self.service}",
-                        f"{self.local_port}:{self.remote_port}",
-                        "-n",
-                        self.namespace,
-                        "--address",
-                        "127.0.0.1",
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except FileNotFoundError:
-                logger.warning("kubectl not found in environment; running in simulation fallback mode")
-                return self.local_port
-
-            start = time.time()
-            while time.time() - start < timeout:
-                if self._healthy():
-                    logger.info(
-                        f"Port-forward service/{self.service} {self.local_port}->{self.remote_port} established"
-                    )
-                    return int(self.local_port)
-                time.sleep(0.2)
-            logger.warning(
-                f"Port-forward to {self.service} did not become ready; continuing with port {self.local_port}"
-            )
-            return int(self.local_port)
-
-    def stop(self):
-        if self.process:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=2)
-            except Exception:
-                with contextlib.suppress(Exception):
-                    self.process.kill()
-            self.process = None
 
 
 @dataclass
@@ -142,11 +70,11 @@ class AgenticRetryWorkload:
 
         self.orchestrator_forward = KubectlPortForward(self.namespace, "agent-orchestrator", 8000)
         self.gateway_forward = KubectlPortForward(self.namespace, "tool-gateway", 8001)
-        self.data_api_forward = KubectlPortForward(self.namespace, "data-api", 8002)
+        self.data_api_forward = KubectlPortForward(self.namespace, "data-api", 8003)
 
         self._running = False
         self._worker_thread: threading.Thread | None = None
-        self._executor = ThreadPoolExecutor(max_workers=30)
+        self._executor: ThreadPoolExecutor | None = None
         self._lock = threading.Lock()
 
         self._requests_history: deque[tuple[float, bool, float]] = deque(maxlen=2000)
@@ -170,6 +98,8 @@ class AgenticRetryWorkload:
         """Starts port forwards and background open-loop traffic generator."""
         if self._running:
             return
+
+        self._executor = ThreadPoolExecutor(max_workers=30)
         self._running = True
         if not self.test_mode:
             self.orchestrator_forward.start()
@@ -189,7 +119,9 @@ class AgenticRetryWorkload:
         self.orchestrator_forward.stop()
         self.gateway_forward.stop()
         self.data_api_forward.stop()
-        self._executor.shutdown(wait=False)
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
         logger.info("AgenticRetryWorkload stopped")
 
     def _send_single_request(self, req_id: str, wf_id: str):
@@ -234,7 +166,13 @@ class AgenticRetryWorkload:
             with self._lock:
                 self._submitted_count += 1
 
-            self._executor.submit(self._send_single_request, req_id, wf_id)
+            executor = self._executor
+            if executor is None or not self._running:
+                break
+            try:
+                executor.submit(self._send_single_request, req_id, wf_id)
+            except RuntimeError:
+                break
 
             elapsed = time.time() - loop_start
             sleep_time = interval - elapsed
@@ -242,10 +180,12 @@ class AgenticRetryWorkload:
                 time.sleep(sleep_time)
 
     def inject_latency_fault(self, latency_ms: float = 1500.0, duration_seconds: float = 10.0):
-        """Sends HTTP POST to Data API /admin/fault to inject transient latency perturbation."""
+        """Sends HTTP POST to Data API /admin/fault on control port to inject transient latency perturbation."""
         self._fault_active = True
         self._fault_triggered = True
-        port = self.data_api_forward.local_port or 8002
+        if not self.test_mode and not self.data_api_forward._healthy():
+            self.data_api_forward.start()
+        port = self.data_api_forward.local_port or 8003
         url = f"http://127.0.0.1:{port}/admin/fault"
         payload = json.dumps({"latency_ms": latency_ms, "duration_seconds": duration_seconds}).encode("utf-8")
         req = urllib.request.Request(url, data=payload, method="POST")
@@ -256,11 +196,15 @@ class AgenticRetryWorkload:
                 logger.info(f"Injected cluster latency fault: {resp.read().decode('utf-8')}")
         except Exception as e:
             logger.warning(f"Failed to post to /admin/fault on cluster: {e}")
+            if not self.test_mode:
+                raise RuntimeError(f"Failed to inject backend latency fault on live cluster: {e}") from e
 
     def remove_latency_fault(self):
-        """Sends HTTP POST to Data API /admin/recover."""
+        """Sends HTTP POST to Data API /admin/recover on control port."""
         self._fault_active = False
-        port = self.data_api_forward.local_port or 8002
+        if not self.test_mode and not self.data_api_forward._healthy():
+            self.data_api_forward.start()
+        port = self.data_api_forward.local_port or 8003
         url = f"http://127.0.0.1:{port}/admin/recover"
         req = urllib.request.Request(url, data=b"{}", method="POST")
         req.add_header("Content-Type", "application/json")
@@ -270,6 +214,8 @@ class AgenticRetryWorkload:
                 logger.info(f"Recovered cluster latency fault: {resp.read().decode('utf-8')}")
         except Exception as e:
             logger.warning(f"Failed to post to /admin/recover on cluster: {e}")
+            if not self.test_mode:
+                raise RuntimeError(f"Failed to recover backend latency fault on live cluster: {e}") from e
 
     def apply_mitigation(
         self,
@@ -351,9 +297,28 @@ class AgenticRetryWorkload:
         self.reset_metric_baseline()
 
     def reset_metric_baseline(self):
-        """Discard pre-change counters before scoring a new observation window."""
-        self._metric_baseline_initialized = False
-        self._last_snapshot_time = time.time()
+        """Immediately captures current counter values to form baseline for next delta."""
+        now = time.time()
+        if self.test_mode:
+            self._last_snapshot_time = now
+            self._metric_baseline_initialized = True
+            return
+
+        orch_port = self.orchestrator_forward.local_port or 8000
+        gw_port = self.gateway_forward.local_port or 8001
+        data_port = self.data_api_forward.local_port or 8003
+
+        orch = self._scrape_prometheus_metrics(orch_port)
+        gw = self._scrape_prometheus_metrics(gw_port)
+        data = self._scrape_prometheus_metrics(data_port)
+
+        self._last_logical_workflows = orch.get("logical_workflows_total", 0.0)
+        self._last_goodput_requests = orch.get("goodput_requests_total", 0.0)
+        self._last_tool_operations = gw.get("tool_operations_started_total", 0.0)
+        self._last_backend_requests = data.get("backend_requests_total", 0.0)
+
+        self._last_snapshot_time = now
+        self._metric_baseline_initialized = True
 
     def _scrape_prometheus_metrics(self, port: int) -> dict[str, float]:
         """Scrapes and parses Prometheus metrics format from live endpoint."""
@@ -399,7 +364,7 @@ class AgenticRetryWorkload:
 
         orch_port = self.orchestrator_forward.local_port or 8000
         gw_port = self.gateway_forward.local_port or 8001
-        data_port = self.data_api_forward.local_port or 8002
+        data_port = self.data_api_forward.local_port or 8003
 
         orch_metrics = self._scrape_prometheus_metrics(orch_port)
         gw_metrics = self._scrape_prometheus_metrics(gw_port)

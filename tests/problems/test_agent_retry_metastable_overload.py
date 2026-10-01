@@ -81,3 +81,24 @@ def test_workload_metastable_loop_and_mitigation():
         assert snapshot.backend_queue_depth == 0
     finally:
         workload.stop()
+
+
+def test_workload_can_restart_after_stop():
+    """Verify that AgenticRetryWorkload can safely be started, stopped, and restarted."""
+    workload = AgenticRetryWorkload(test_mode=True)
+
+    workload.start()
+    assert workload._running
+    assert workload._executor is not None
+
+    workload.stop()
+    assert not workload._running
+    assert workload._executor is None
+
+    workload.start()
+    assert workload._running
+    assert workload._executor is not None
+
+    workload.stop()
+    assert not workload._running
+    assert workload._executor is None
