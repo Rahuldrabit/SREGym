@@ -38,6 +38,7 @@ from sregym.conductor.problems.apps.gitlab.notification_unannounced import (
     GitLabNotificationUnannouncedAmbiguityProblem,
 )
 from sregym.conductor.problems.image_slow_load import ImageSlowLoad
+from sregym.conductor.problems.environment_ports import PORTED_PROBLEMS
 from sregym.conductor.problems.apps.frappe.desk_and_queue_outage import FrappeDeskAndQueueOutage
 from sregym.conductor.problems.apps.frappe.writes_and_queue_oom import FrappeWritesAndQueueOOM
 from sregym.conductor.problems.apps.saleor.statement_timeout import SaleorCheckoutStatementTimeoutCanary
@@ -300,6 +301,8 @@ class ProblemRegistry:
             "slack_sends_fail_compliance_window": SlackSendsFailComplianceWindow,
             "slack_seq_lock_leak": SlackSeqLockLeak,
             "slack_distractor_volume_seq_lock": SlackDistractorVolumeSeqLock,
+            # Existing faults ported to Frappe, Saleor and Slack Spine.
+            **PORTED_PROBLEMS,
         }
 # fmt: on
         self.kubectl = KubeCtl()

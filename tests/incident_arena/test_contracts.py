@@ -52,6 +52,36 @@ def test_problem_ids_are_registered(monkeypatch):
         assert registry.get_problem(problem_id) is cls
 
 
+def test_ported_lite_suite_matches_current_lite_order():
+    from sregym.conductor.problems.environment_ports import LITE_IA_PORTS
+
+    expected = tuple(LITE_IA_PORTS[problem_id][0] for problem_id in PROBLEM_SETS["sregym-lite"])
+    assert PROBLEM_SETS["sregym-lite-ia"] == expected
+
+
+def test_all_fault_ports_remain_registered(monkeypatch):
+    import sregym.conductor.problems.registry as registry_module
+    from sregym.conductor.problems.environment_ports import PORTED_PROBLEMS
+
+    monkeypatch.setattr(registry_module, "KubeCtl", lambda: None)
+    registry = registry_module.ProblemRegistry()
+    for problem_id, factory in PORTED_PROBLEMS.items():
+        assert registry.get_problem(problem_id) is factory
+
+
+def test_frappe_enables_scheduler_after_startup(offline_cluster, monkeypatch):
+    from sregym.service.apps.components.incident_arena import IncidentArenaApplication
+    from sregym.service.apps.frappe.application import Frappe
+
+    app = Frappe()
+    calls = []
+    monkeypatch.setattr(IncidentArenaApplication, "deploy", lambda self: calls.append("ready"))
+    monkeypatch.setattr(app, "site_python", lambda body: calls.append(body))
+    app.deploy()
+    assert calls[0] == "ready"
+    assert "enable_scheduler()" in calls[1] and "frappe.db.commit()" in calls[1]
+
+
 @pytest.mark.parametrize("slug", ALL_TASKS)
 def test_task_contract_is_complete(slug):
     task = IncidentArenaTask.load(slug)
@@ -120,10 +150,27 @@ def test_problem_constructs_offline(offline_cluster, problem_cls):
 
 def test_image_tier_tasks_deploy_their_release_build(offline_cluster):
     from sregym.conductor.problems.apps.slack_spine.lock_leaks import SlackDistractorVolumeSeqLock, SlackSeqLockLeak
+    from sregym.service.apps.helpers import image_reference
 
-    for cls in (SlackSeqLockLeak, SlackDistractorVolumeSeqLock):
+    for cls, image_id in (
+        (SlackSeqLockLeak, "slack-spine-app-v2"),
+        (SlackDistractorVolumeSeqLock, "slack-spine-app-v3"),
+    ):
         problem = cls()
-        assert problem.app.deploy_overrides["images"]["app"] == problem.task.task_values["images"]["app"]
+        assert problem.app.deploy_overrides["images"]["app"] == image_reference(image_id)
+        assert problem.app.deploy_overrides["images"]["app"] != image_reference("slack-spine-app")
+
+
+def test_frappe_queue_oom_keeps_its_original_image_generation(offline_cluster):
+    from sregym.conductor.problems.apps.frappe.writes_and_queue_oom import FrappeWritesAndQueueOOM
+    from sregym.service.apps.helpers import image_reference
+
+    images = FrappeWritesAndQueueOOM().app.deploy_overrides["images"]
+    assert images == {
+        "main": image_reference("frappe-toolbox-legacy"),
+        "loadgen": image_reference("frappe-loadgen-legacy"),
+        "frappeAdmin": image_reference("frappe-admin-legacy"),
+    }
 
 
 def test_compliance_window_is_context_not_a_cause(offline_cluster):

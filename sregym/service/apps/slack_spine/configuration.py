@@ -13,7 +13,7 @@ HEALTHY_HOLD_MS = {
     "auth": 5,
     "workspace": 8,
     "channel": 10,
-    "message": 150,
+    "message": 10,
     "thread": 12,
     "file": 8,
     "search": 8,
