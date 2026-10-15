@@ -48,13 +48,24 @@ _driver_results: list[dict] = []
 _driver_base_dir: Path | None = None
 _driver_error: BaseException | None = None
 EVALUATION_DRAIN_TIMEOUT_SECONDS = 300
-CLEANUP_DRAIN_TIMEOUT_SECONDS = 300
+CLEANUP_DRAIN_TIMEOUT_SECONDS = int(os.getenv("SREGYM_CLEANUP_DRAIN_TIMEOUT_SECONDS", "600"))
 
 
 def problem_cleanup_timeout(conductor) -> float:
     """Allow stateful reference recovery its own budget after agent grading."""
     problem = getattr(conductor, "problem", None)
     return getattr(problem, "cleanup_timeout_seconds", CLEANUP_DRAIN_TIMEOUT_SECONDS)
+
+
+def cleanup_interrupted_problem(conductor) -> None:
+    """Give an interrupted workload the same bounded teardown as a completed run."""
+    if getattr(conductor, "problem", None) is None:
+        return
+    try:
+        cleanup = conductor.finish_problem_in_background()
+        cleanup.result(timeout=problem_cleanup_timeout(conductor))
+    except Exception as exc:
+        logger.warning("Interrupted benchmark cleanup did not finish cleanly: %s", exc)
 
 
 def _http_endpoint(value: str) -> str:
@@ -974,6 +985,7 @@ def _run_benchmark(args, *, judge_backend: str = "api", agent_image: str | None 
         run_api(conductor)
     except KeyboardInterrupt:
         # If interrupted, still try to shut down cleanly
+        cleanup_interrupted_problem(conductor)
         LAUNCHER.cleanup_all()
         request_shutdown()
     finally:
