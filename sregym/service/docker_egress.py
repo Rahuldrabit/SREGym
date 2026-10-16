@@ -112,7 +112,7 @@ class DockerEgress:
         }
 
     def blocked_request_count(self) -> int:
-        return sum(1 for line in self._blocked_request_lines() if line.strip())
+        return sum(1 for line in self._blocked_request_lines(missing_ok=True) if line.strip())
 
     def blocked_request_records(self, start: int = 0) -> list[dict[str, str | int]]:
         """Read this attempt's records before the proxy state is removed."""
@@ -131,7 +131,7 @@ class DockerEgress:
             raise ValueError("blocked-request log was truncated during the attempt")
         return records
 
-    def _blocked_request_lines(self) -> list[str]:
+    def _blocked_request_lines(self, *, missing_ok: bool = False) -> list[str]:
         """Read the proxy audit before falling back to retained host state."""
         if self._proxy_name:
             result = subprocess.run(
@@ -146,7 +146,9 @@ class DockerEgress:
         try:
             return (self._tmp_dir / "blocked-requests.jsonl").read_text(encoding="utf-8").splitlines()
         except FileNotFoundError:
-            return []
+            if missing_ok:
+                return []
+            raise
 
     def ensure_started(self, rules: tuple[EndpointRule, ...]) -> None:
         if self._proxy_name is not None:
