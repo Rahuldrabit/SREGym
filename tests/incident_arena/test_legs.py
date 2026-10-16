@@ -280,7 +280,7 @@ def test_pool_leg_floors_and_ceilings():
     assert _passed(leg.checks("d"))["channel_pool_within_ceiling"] is False
 
     message = _bind(RolePoolSize("message", 3, 2, floors=None), app)
-    app.configs["message"]["db"].update(pool_size=8, max_overflow=4, hold_ms=150)
+    app.configs["message"]["db"].update(pool_size=8, max_overflow=4, hold_ms=10)
     assert all(r.passed for r in message.checks("d"))
 
 
