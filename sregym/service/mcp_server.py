@@ -77,7 +77,7 @@ class MCPServer:
         output = []
         for command in commands:
             try:
-                result = self.kubectl.exec_command(command)
+                result = self.kubectl.exec_command_checked(command, timeout=10)
             except Exception as exc:
                 result = f"diagnostic command failed: {type(exc).__name__}: {exc}"
             output.append(f"$ {command}\n{str(result)[-4000:]}")

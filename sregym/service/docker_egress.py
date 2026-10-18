@@ -132,15 +132,31 @@ class DockerEgress:
         return records
 
     def _blocked_request_lines(self, *, missing_ok: bool = False) -> list[str]:
-        """Read the proxy audit before falling back to retained host state."""
+        """Read authoritative proxy state, including from a stopped container."""
         if self._proxy_name:
-            result = subprocess.run(
-                ["docker", "exec", self._proxy_name, "cat", PROXY_BLOCKED_LOG_PATH],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                return result.stdout.splitlines()
+            try:
+                result = subprocess.run(
+                    ["docker", "exec", self._proxy_name, "cat", PROXY_BLOCKED_LOG_PATH],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if result.returncode == 0:
+                    return result.stdout.splitlines()
+                # docker exec requires a running container; docker cp does not.
+                # Never substitute the untouched host bootstrap log for this audit.
+                with tempfile.TemporaryDirectory(prefix="evaluation-egress-audit-") as directory:
+                    log_path = Path(directory) / "blocked-requests.jsonl"
+                    copied = subprocess.run(
+                        ["docker", "cp", f"{self._proxy_name}:{PROXY_BLOCKED_LOG_PATH}", str(log_path)],
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    if copied.returncode != 0:
+                        raise OSError("Could not copy the filtered egress audit")
+                    return log_path.read_text(encoding="utf-8").splitlines()
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise OSError("Could not read the filtered egress proxy audit") from exc
         if self._tmp_dir is None:
             return []
         try:
@@ -177,6 +193,9 @@ class DockerEgress:
 
         try:
             self._prepare_state()
+            state_dir = self._tmp_dir
+            if state_dir is None:
+                raise RuntimeError("Filtered egress state is not initialized")
             self._run_docker_checked(
                 ["docker", "network", "create", "--internal", self._network_name],
                 "create the filtered egress network",
@@ -212,9 +231,9 @@ class DockerEgress:
             )
             self._copy_file_to_proxy(addon_path, "/addons/egress_proxy.py")
             self._copy_file_to_proxy(policy_path, "/addons/internet_policy.py")
-            self._copy_file_to_proxy(self._tmp_dir / "policy.json", "/state/policy.json")
+            self._copy_file_to_proxy(state_dir / "policy.json", "/state/policy.json")
             self._run_docker_checked(
-                ["docker", "exec", self._proxy_name, "touch", PROXY_BOOTSTRAP_SENTINEL],
+                ["docker", "exec", self._proxy_name, "touch", PROXY_BLOCKED_LOG_PATH, PROXY_BOOTSTRAP_SENTINEL],
                 "start the filtered egress proxy",
             )
             self._run_docker_checked(
@@ -337,17 +356,7 @@ class DockerEgress:
         combined_bundle = self._tmp_dir / "ca-certificates.crt"
         combined_bundle.write_bytes(system_bundle.read_bytes() + b"\n" + proxy_ca.read_bytes())
         self._copy_file_to_proxy(combined_bundle, "/certs/ca-certificates.crt")
-        self._run_docker_checked(
-            [
-                "docker",
-                "exec",
-                self._proxy_name,
-                "cp",
-                container_path,
-                "/certs/mitmproxy-ca-cert.pem",
-            ],
-            "copy the filtered egress proxy certificate into the shared volume",
-        )
+        self._copy_file_to_proxy(proxy_ca, "/certs/mitmproxy-ca-cert.pem")
         self._proxy_ca = proxy_ca
         self._ca_bundle = combined_bundle
 
@@ -372,7 +381,7 @@ class DockerEgress:
                     capture_output=True,
                 )
             subprocess.run(
-                ["docker", "rm", "-f", self._proxy_name],
+                ["docker", "rm", "-f", "-v", self._proxy_name],
                 capture_output=True,
             )
         if self._network_name:

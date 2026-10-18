@@ -693,14 +693,14 @@ class KubeCtl:
             self.wait_for_namespace_deletion(namespace, max_wait=NAMESPACE_GRACEFUL_DELETE_TIMEOUT)
         except Exception as exc:
             forced = self.force_delete_namespace_pods(namespace)
-            if not forced:
-                raise
             logger.warning(
                 "Namespace %r did not terminate gracefully (%s); force-deleted %d pod(s)",
                 namespace,
                 exc,
                 forced,
             )
+            # No remaining pods can mean deletion just completed, or another
+            # resource's finalizer is still finishing. Both need the final check.
             self.wait_for_namespace_deletion(namespace, max_wait=NAMESPACE_FORCE_DELETE_TIMEOUT)
 
         logger.info(f"Namespace '{namespace}' deleted successfully.")

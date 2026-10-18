@@ -195,6 +195,34 @@ def test_namespace_cleanup_force_deletes_stuck_pods_after_graceful_timeout(monke
     assert any("force-deleted 1 pod" in record.message for record in caplog.records)
 
 
+@pytest.mark.parametrize("already_gone", [False, True])
+def test_namespace_cleanup_waits_for_finalization_without_remaining_pods(already_gone):
+    kubectl = object.__new__(KubeCtl)
+    list_pods = Mock(return_value=SimpleNamespace(items=[]))
+    if already_gone:
+        list_pods.side_effect = ApiException(status=404)
+    kubectl.core_v1_api = SimpleNamespace(delete_namespace=Mock(), list_namespaced_pod=list_pods)
+    kubectl.wait_for_namespace_deletion = Mock(side_effect=[TimeoutError("graceful deadline"), None])
+
+    kubectl.delete_namespace("benchmark")
+
+    assert kubectl.wait_for_namespace_deletion.call_count == 2
+    assert (
+        kubectl.wait_for_namespace_deletion.call_args.kwargs["max_wait"]
+        == kubectl_module.NAMESPACE_FORCE_DELETE_TIMEOUT
+    )
+
+
+def test_namespace_cleanup_still_fails_if_finalization_never_finishes():
+    kubectl = object.__new__(KubeCtl)
+    kubectl.core_v1_api = SimpleNamespace(
+        delete_namespace=Mock(), list_namespaced_pod=Mock(return_value=SimpleNamespace(items=[]))
+    )
+    kubectl.wait_for_namespace_deletion = Mock(side_effect=[TimeoutError("graceful"), TimeoutError("final")])
+    with pytest.raises(TimeoutError, match="final"):
+        kubectl.delete_namespace("benchmark")
+
+
 def test_no_matching_cleanup_jobs_is_a_debug_noop(monkeypatch, caplog):
     batch_api = SimpleNamespace(
         list_namespaced_job=lambda namespace, label_selector: SimpleNamespace(items=[]),

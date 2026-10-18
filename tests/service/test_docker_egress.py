@@ -1,6 +1,7 @@
 import asyncio
 import json
 import subprocess
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -85,7 +86,14 @@ def test_proxy_bootstrap_uses_docker_copy_instead_of_host_bind_mounts(monkeypatc
     copy_commands = [command for command in commands if command[1] == "cp"]
     assert len(copy_commands) == 3
     assert all(command[-1].startswith(f"{egress._proxy_name}:") for command in copy_commands)
-    assert ["docker", "exec", egress._proxy_name, "touch", "/state/.sregym-proxy-ready"] in commands
+    assert [
+        "docker",
+        "exec",
+        egress._proxy_name,
+        "touch",
+        "/state/blocked-requests.jsonl",
+        "/state/.sregym-proxy-ready",
+    ] in commands
     egress.close()
 
 
@@ -107,6 +115,64 @@ def test_blocked_request_audit_reads_the_proxy_state(monkeypatch):
 
     assert egress.blocked_request_count() == 1
     assert egress.blocked_request_records() == [record]
+
+
+def test_stopped_proxy_audit_is_copied_instead_of_using_stale_host_log(monkeypatch, tmp_path):
+    egress = DockerEgress()
+    egress._proxy_name = "stopped-proxy"
+    egress._tmp_dir = tmp_path
+    (tmp_path / "blocked-requests.jsonl").touch()
+    record = {
+        "timestamp": "now",
+        "method": "CONNECT",
+        "scheme": "",
+        "host": "blocked.test",
+        "port": 443,
+        "reason": "endpoint-not-allowed",
+    }
+
+    def docker(command, **kwargs):
+        assert kwargs["timeout"] == 10
+        if command[1] == "cp":
+            Path(command[-1]).write_text(json.dumps(record) + "\n")
+            return subprocess.CompletedProcess(command, 0)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="container is not running")
+
+    monkeypatch.setattr("sregym.service.docker_egress.subprocess.run", docker)
+    assert egress.blocked_request_records() == [record]
+    assert (tmp_path / "blocked-requests.jsonl").read_text() == ""
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "timeout"])
+def test_unreadable_proxy_audit_is_not_replaced_by_empty_host_log(monkeypatch, tmp_path, failure):
+    egress = DockerEgress()
+    egress._proxy_name = "unavailable-proxy"
+    egress._tmp_dir = tmp_path
+    (tmp_path / "blocked-requests.jsonl").touch()
+    run = Mock(return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="unavailable"))
+    if failure == "timeout":
+        run.side_effect = subprocess.TimeoutExpired("docker", 10)
+    monkeypatch.setattr("sregym.service.docker_egress.subprocess.run", run)
+
+    with pytest.raises(OSError, match="Could not read"):
+        egress.blocked_request_records()
+
+
+def test_proxy_cleanup_removes_its_anonymous_volumes(monkeypatch):
+    egress = DockerEgress()
+    egress._proxy_name = "proxy"
+    egress._network_name = "network"
+    egress._cert_volume = "certificates"
+    run = Mock(return_value=subprocess.CompletedProcess([], 0))
+    monkeypatch.setattr("sregym.service.docker_egress.subprocess.run", run)
+
+    egress.close()
+
+    assert [call.args[0] for call in run.call_args_list] == [
+        ["docker", "rm", "-f", "-v", "proxy"],
+        ["docker", "network", "rm", "network"],
+        ["docker", "volume", "rm", "certificates"],
+    ]
 
 
 def test_runner_cleanup_attempts_each_resource_even_if_proxy_cleanup_fails(monkeypatch):
