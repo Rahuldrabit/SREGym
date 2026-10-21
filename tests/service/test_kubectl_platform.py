@@ -65,6 +65,36 @@ def test_transient_pull_failure_can_recover():
     sleep.assert_called_once()
 
 
+def test_preload_image_creates_all_node_pods_before_waiting_and_cleans_up():
+    kubectl = KubeCtl.__new__(KubeCtl)
+    kubectl.core_v1_api = Mock()
+    kubectl.list_nodes = Mock(
+        return_value=client.V1NodeList(
+            items=[
+                client.V1Node(metadata=client.V1ObjectMeta(name="worker-a")),
+                client.V1Node(metadata=client.V1ObjectMeta(name="worker-b")),
+            ]
+        )
+    )
+    kubectl.core_v1_api.read_namespaced_pod.return_value = client.V1Pod(
+        metadata=client.V1ObjectMeta(name="preload"),
+        spec=client.V1PodSpec(containers=[]),
+        status=client.V1PodStatus(phase="Succeeded"),
+    )
+
+    kubectl.preload_image_on_nodes("registry.example/helper:v1", "openebs", timeout=10)
+
+    creates = kubectl.core_v1_api.create_namespaced_pod.call_args_list
+    assert len(creates) == 2
+    assert {call.kwargs["body"].spec.node_name for call in creates} == {"worker-a", "worker-b"}
+    assert all(call.kwargs["body"].spec.containers[0].image == "registry.example/helper:v1" for call in creates)
+    assert len({call.kwargs["body"].metadata.name for call in creates}) == 2
+    assert kubectl.core_v1_api.method_calls[:2] == [
+        call for call in kubectl.core_v1_api.method_calls if call[0] == "create_namespaced_pod"
+    ]
+    assert kubectl.core_v1_api.delete_namespaced_pod.call_count == 2
+
+
 def test_platform_status_is_checked_before_slow_logs_from_other_pods():
     kubectl = KubeCtl.__new__(KubeCtl)
     kubectl.list_pods = Mock(return_value=client.V1PodList(items=[_failed_pod(), _pod("exec format error")]))

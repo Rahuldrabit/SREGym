@@ -53,13 +53,17 @@ def test_prometheus_reuses_only_the_requested_profile(monkeypatch, installed, re
 
     prometheus.deploy()
 
-    assert run.call_args.args[0][-3:] == ["--all", "-o", "json"]
+    assert any(call.args[0][-3:] == ["--all", "-o", "json"] for call in run.call_args_list)
     assert helm.install.call_count == (installed != requested)
     assert helm.uninstall.call_count == (installed != requested)
     assert helm.assert_if_deployed.call_count == (installed != requested)
     if installed != requested:
         extra_args = helm.install.call_args.kwargs.get("extra_args", [])
         assert any("values-svelte.yaml" in arg for arg in extra_args) == (requested == "svelte")
+        delete = run.call_args_list[-1]
+        assert delete.args[0][:4] == ["kubectl", "delete", "pvc", "-n"]
+        assert "app.kubernetes.io/instance=prometheus" in delete.args[0]
+        assert delete.kwargs["check"] is True
 
 
 @pytest.mark.parametrize("requested", ["full", "svelte"])
@@ -68,13 +72,41 @@ def test_prometheus_fresh_install_does_not_query_a_missing_release(monkeypatch, 
     profile.set_profile(requested)
     monkeypatch.setattr(prometheus, "_is_prometheus_running", lambda: False)
     monkeypatch.setattr(prometheus, "_wait_for_namespace_termination", lambda: None)
+    cleanup = MagicMock()
+    monkeypatch.setattr(prometheus, "_delete_retained_pvcs", cleanup)
     query = MagicMock()
     monkeypatch.setattr(prometheus, "_matches_requested_profile", query)
     helm = MagicMock(spec=Helm)
     monkeypatch.setattr(prometheus_module, "Helm", helm)
     prometheus.deploy()
     query.assert_not_called()
+    cleanup.assert_called_once_with()
     helm.install.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "pod_conditions,expected",
+    [
+        ([], False),
+        ([[{"type": "Ready", "status": "True"}]], True),
+        (
+            [
+                [{"type": "Ready", "status": "True"}],
+                [{"type": "Ready", "status": "False"}],
+            ],
+            False,
+        ),
+    ],
+)
+def test_prometheus_reuse_requires_every_release_pod_ready(monkeypatch, pod_conditions, expected):
+    prometheus = Prometheus()
+    payload = {"items": [{"status": {"conditions": conditions}} for conditions in pod_conditions]}
+    kubectl = MagicMock()
+    kubectl.exec_command.return_value = json.dumps(payload)
+    monkeypatch.setattr(prometheus_module, "KubeCtl", MagicMock(return_value=kubectl))
+
+    assert prometheus._is_prometheus_running() is expected
+    assert "app.kubernetes.io/instance=prometheus" in kubectl.exec_command.call_args.args[0]
 
 
 @pytest.mark.parametrize(

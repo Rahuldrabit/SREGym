@@ -1,32 +1,49 @@
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# archive.ubuntu.com can be served through stale transparent caches that pair
+# an old Release file with newer package indexes. Keep the mirror overridable,
+# and use Canonical's Azure mirror by default to avoid that failure mode.
+ARG UBUNTU_MIRROR=http://azure.archive.ubuntu.com/ubuntu
 
 # ───────────────────────────────────────────────
 # 1. Install packages
 # ───────────────────────────────────────────────
-RUN apt-get update \
+RUN for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do \
+        if [ -f "$source_file" ]; then \
+            sed -i "s|http://archive.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g" "$source_file"; \
+        fi; \
+    done \
+    && for attempt in 1 2 3 4 5; do \
+        rm -rf /var/lib/apt/lists/*; \
+        apt-get -o Acquire::Retries=5 update && break; \
+        if [ "$attempt" = 5 ]; then exit 1; fi; \
+        sleep "$((attempt * 10))"; \
+    done \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg software-properties-common \
+        ca-certificates curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && add-apt-repository ppa:deadsnakes/ppa
+RUN curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://deb.nodesource.com/setup_22.x | bash -
 
-RUN apt-get update \
+RUN for attempt in 1 2 3 4 5; do \
+        rm -rf /var/lib/apt/lists/*; \
+        apt-get -o Acquire::Retries=5 update && break; \
+        if [ "$attempt" = 5 ]; then exit 1; fi; \
+        sleep "$((attempt * 10))"; \
+    done \
     && apt-get install -y --no-install-recommends \
         git wget jq \
         nodejs \
-        python3.12 python3.12-venv python3.12-dev \
+        python3.12 python3.12-venv python3.12-dev python3-pip \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
     && rm -rf /var/lib/apt/lists/*
 
 # ───────────────────────────────────────────────
 # 2. Python + pip
 # ───────────────────────────────────────────────
-RUN python3 -m ensurepip --upgrade \
-    && python3 -m pip install --upgrade pip \
-    && ln -sf /usr/bin/python3 /usr/bin/python
+RUN ln -sf /usr/bin/python3 /usr/bin/python
 
 # ───────────────────────────────────────────────
 # 3. kubectl

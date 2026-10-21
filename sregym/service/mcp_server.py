@@ -10,7 +10,7 @@ import requests
 import yaml
 
 from sregym.paths import MCP_SERVER_K8S
-from sregym.service.kubectl import KubeCtl
+from sregym.service.kubectl import WAIT_FOR_POD_READY_TIMEOUT, KubeCtl
 from sregym.service.kubernetes_access_policy import restricted_cluster_role
 from sregym.service.rollout import deployment_rollout_complete
 
@@ -80,9 +80,10 @@ class MCPServer:
                 f"kubectl set env deployment/{self.service_name} -n {self.namespace} {env_args}", timeout=30
             )
 
+        rollout_timeout = WAIT_FOR_POD_READY_TIMEOUT
         self.kubectl.exec_command_checked(
-            f"kubectl rollout status deployment/{self.service_name} -n {self.namespace} --timeout=180s",
-            timeout=190,
+            f"kubectl rollout status deployment/{self.service_name} -n {self.namespace} --timeout={rollout_timeout}s",
+            timeout=rollout_timeout + 10,
         )
         if not already_running:
             self.kubectl.wait_for_ready(self.namespace)

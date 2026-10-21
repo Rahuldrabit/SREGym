@@ -8,7 +8,7 @@ import yaml
 from sregym.paths import BASE_DIR, PROMETHEUS_METADATA
 from sregym.profile import is_svelte
 from sregym.service.helm import Helm
-from sregym.service.kubectl import KubeCtl
+from sregym.service.kubectl import WAIT_FOR_POD_READY_TIMEOUT, KubeCtl
 
 
 class Prometheus:
@@ -73,6 +73,7 @@ class Prometheus:
         self._wait_for_namespace_termination()
 
         Helm.uninstall(**self.helm_configs)
+        self._delete_retained_pvcs()
 
         helm_configs = dict(self.helm_configs)
         if is_svelte():
@@ -82,6 +83,34 @@ class Prometheus:
 
         Helm.install(**helm_configs)
         Helm.assert_if_deployed(self.namespace)
+
+    def _delete_retained_pvcs(self) -> None:
+        """Remove release PVCs that Helm intentionally retains on uninstall.
+
+        A failed LocalPV helper can leave a claim Bound even though its node
+        directory was never created. Reusing that claim makes every later
+        Prometheus install fail at mount time, so a fresh Helm install must also
+        start with fresh release storage.
+        """
+        release_name = self.helm_configs["release_name"]
+        subprocess.run(
+            [
+                "kubectl",
+                "delete",
+                "pvc",
+                "-n",
+                self.namespace,
+                "-l",
+                f"app.kubernetes.io/instance={release_name}",
+                "--ignore-not-found=true",
+                "--wait=true",
+                f"--timeout={WAIT_FOR_POD_READY_TIMEOUT}s",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=WAIT_FOR_POD_READY_TIMEOUT + 10,
+        )
 
     def _matches_requested_profile(self) -> bool:
         """Compare installed Helm values with the settings controlled by the profile."""
@@ -134,12 +163,17 @@ class Prometheus:
             KubeCtl().wait_for_namespace_deletion(self.namespace)
 
     def _is_prometheus_running(self) -> bool:
-        """Check if Prometheus is already running in the cluster."""
-        command = f"kubectl get pods -n {self.namespace} -l app.kubernetes.io/name=prometheus"
+        """Return whether every pod owned by the Helm release is Ready."""
+        release_name = self.helm_configs["release_name"]
+        command = f"kubectl get pods -n {self.namespace} -l app.kubernetes.io/instance={release_name} -o json"
         try:
-            result = KubeCtl().exec_command(command)
-            if "Running" in result:
-                return True
-        except subprocess.CalledProcessError:
+            pods = json.loads(KubeCtl().exec_command(command)).get("items", [])
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
             return False
-        return False
+        return bool(pods) and all(
+            any(
+                condition.get("type") == "Ready" and condition.get("status") == "True"
+                for condition in pod.get("status", {}).get("conditions", [])
+            )
+            for pod in pods
+        )

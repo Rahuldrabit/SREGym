@@ -5,6 +5,7 @@ import json
 import logging
 import subprocess
 import time
+import uuid
 
 logger = logging.getLogger("all.infra.kubectl")
 logger.propagate = True
@@ -266,10 +267,7 @@ class KubeCtl:
         containers from ever starting. Ordinary pull failures and application
         crashes remain eligible for the normal readiness retry.
         """
-        statuses = [
-            *(pod.status.init_container_statuses or []),
-            *(pod.status.container_statuses or []),
-        ]
+        statuses = [*(pod.status.init_container_statuses or []), *(pod.status.container_statuses or [])]
         for status in statuses:
             if status.ready:
                 continue
@@ -700,6 +698,80 @@ class KubeCtl:
                 results[node_name] = -1
 
         return results
+
+    def preload_image_on_nodes(
+        self,
+        image: str,
+        namespace: str,
+        timeout: int = WAIT_FOR_POD_READY_TIMEOUT,
+    ) -> None:
+        """Pull ``image`` into every node's containerd store concurrently.
+
+        LocalPV chooses a node only after a consumer is scheduled. Preloading on
+        every node prevents its short-lived volume helper from spending the
+        provisioner's creation timeout pulling a cold image. Unique pod names
+        also keep an interrupted preload from blocking a later retry.
+        """
+        nodes = [node.metadata.name for node in self.list_nodes().items]
+        if not nodes:
+            raise RuntimeError(f"Cannot preload {image}: cluster has no nodes")
+
+        suffix = uuid.uuid4().hex[:8]
+        pods: dict[str, str] = {}
+        try:
+            for index, node_name in enumerate(nodes):
+                pod_name = f"sregym-image-preload-{index}-{suffix}"
+                body = client.V1Pod(
+                    metadata=client.V1ObjectMeta(
+                        name=pod_name,
+                        namespace=namespace,
+                        labels={"app": "sregym-image-preload"},
+                    ),
+                    spec=client.V1PodSpec(
+                        node_name=node_name,
+                        restart_policy="Never",
+                        tolerations=[client.V1Toleration(operator="Exists")],
+                        automount_service_account_token=False,
+                        containers=[
+                            client.V1Container(
+                                name="preload",
+                                image=image,
+                                image_pull_policy="IfNotPresent",
+                                command=["sh", "-c", "true"],
+                            )
+                        ],
+                    ),
+                )
+                self.core_v1_api.create_namespaced_pod(namespace=namespace, body=body)
+                pods[pod_name] = node_name
+
+            deadline = time.monotonic() + timeout
+            pending = set(pods)
+            while pending and time.monotonic() < deadline:
+                for pod_name in tuple(pending):
+                    pod = self.core_v1_api.read_namespaced_pod(name=pod_name, namespace=namespace)
+                    self._check_container_platform(pod, namespace)
+                    phase = pod.status.phase if pod.status else None
+                    if phase == "Succeeded":
+                        pending.remove(pod_name)
+                    elif phase == "Failed":
+                        raise RuntimeError(f"Image preload failed for {image} on node {pods[pod_name]}")
+                if pending:
+                    time.sleep(2)
+
+            if pending:
+                blocked_nodes = sorted(pods[name] for name in pending)
+                raise TimeoutError(
+                    f"Image preload for {image} did not finish on nodes {blocked_nodes} within {timeout}s"
+                )
+        finally:
+            for pod_name in pods:
+                with contextlib.suppress(ApiException):
+                    self.core_v1_api.delete_namespaced_pod(
+                        name=pod_name,
+                        namespace=namespace,
+                        grace_period_seconds=0,
+                    )
 
     def run_node_script_pod(
         self,

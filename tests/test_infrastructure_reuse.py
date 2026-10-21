@@ -110,6 +110,7 @@ def startup(conductor, monkeypatch):
     conductor._openebs_ready = MagicMock(return_value=True)
     conductor._preflight_openebs_udev_mount = MagicMock()
     conductor._trim_openebs_ndm = MagicMock()
+    conductor._preload_openebs_helper_image = MagicMock()
     conductor._ensure_openebs_device_storageclass = MagicMock()
     monkeypatch.setattr(conductor_module, "is_svelte", lambda: False)
     monkeypatch.setattr(conductor_module.time, "sleep", MagicMock())
@@ -161,6 +162,34 @@ def test_healthy_infrastructure_is_not_patched(startup):
     startup.kubectl.apps_v1_api.patch_namespaced_daemon_set.assert_not_called()
     assert startup._metrics_server_configured.call_count == 2
     assert startup._openebs_ready.call_count == 2
+    startup._preload_openebs_helper_image.assert_called_once_with()
+
+
+def test_openebs_helper_image_is_discovered_and_preloaded(conductor):
+    container = SimpleNamespace(
+        env=[SimpleNamespace(name="OPENEBS_IO_HELPER_IMAGE", value="registry.example/linux-utils:v1")]
+    )
+    conductor.kubectl.apps_v1_api.read_namespaced_deployment.return_value = SimpleNamespace(
+        spec=SimpleNamespace(template=SimpleNamespace(spec=SimpleNamespace(containers=[container])))
+    )
+
+    conductor._preload_openebs_helper_image()
+
+    conductor.kubectl.preload_image_on_nodes.assert_called_once_with(
+        "registry.example/linux-utils:v1",
+        namespace="openebs",
+        timeout=conductor_module.WAIT_FOR_POD_READY_TIMEOUT,
+    )
+
+
+def test_missing_openebs_helper_image_stops_deployment(conductor):
+    container = SimpleNamespace(env=[])
+    conductor.kubectl.apps_v1_api.read_namespaced_deployment.return_value = SimpleNamespace(
+        spec=SimpleNamespace(template=SimpleNamespace(spec=SimpleNamespace(containers=[container])))
+    )
+
+    with pytest.raises(RuntimeError, match="does not declare OPENEBS_IO_HELPER_IMAGE"):
+        conductor._preload_openebs_helper_image()
 
 
 @pytest.mark.parametrize(
