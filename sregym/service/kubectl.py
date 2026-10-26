@@ -808,7 +808,18 @@ class KubeCtl:
         provisioner's creation timeout pulling a cold image. Unique pod names
         also keep an interrupted preload from blocking a later retry.
         """
-        nodes = [node.metadata.name for node in self.list_nodes().items]
+        deadline = time.monotonic() + timeout
+
+        def request_timeout() -> tuple[float, float]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Image preload for {image} exceeded {timeout}s")
+            # The Kubernetes client ignores scalar floats. Use a tuple for
+            # fractional connection and read budgets.
+            budget = min(10, remaining)
+            return budget, budget
+
+        nodes = [node.metadata.name for node in self.core_v1_api.list_node(_request_timeout=request_timeout()).items]
         if not nodes:
             raise RuntimeError(f"Cannot preload {image}: cluster has no nodes")
 
@@ -838,14 +849,19 @@ class KubeCtl:
                         ],
                     ),
                 )
-                self.core_v1_api.create_namespaced_pod(namespace=namespace, body=body)
+                # A timed-out create can still have reached the API server.
+                # Record its unique name first so cleanup also covers that case.
                 pods[pod_name] = node_name
+                self.core_v1_api.create_namespaced_pod(
+                    namespace=namespace, body=body, _request_timeout=request_timeout()
+                )
 
-            deadline = time.monotonic() + timeout
             pending = set(pods)
             while pending and time.monotonic() < deadline:
                 for pod_name in tuple(pending):
-                    pod = self.core_v1_api.read_namespaced_pod(name=pod_name, namespace=namespace)
+                    pod = self.core_v1_api.read_namespaced_pod(
+                        name=pod_name, namespace=namespace, _request_timeout=request_timeout()
+                    )
                     self._check_container_platform(pod, namespace)
                     phase = pod.status.phase if pod.status else None
                     if phase == "Succeeded":
@@ -853,7 +869,7 @@ class KubeCtl:
                     elif phase == "Failed":
                         raise RuntimeError(f"Image preload failed for {image} on node {pods[pod_name]}")
                 if pending:
-                    time.sleep(2)
+                    time.sleep(min(2, max(0, deadline - time.monotonic())))
 
             if pending:
                 blocked_nodes = sorted(pods[name] for name in pending)
@@ -862,12 +878,16 @@ class KubeCtl:
                 )
         finally:
             for pod_name in pods:
-                with contextlib.suppress(ApiException):
+                try:
                     self.core_v1_api.delete_namespaced_pod(
                         name=pod_name,
                         namespace=namespace,
                         grace_period_seconds=0,
+                        _request_timeout=10,
                     )
+                except Exception as exc:
+                    if not isinstance(exc, ApiException) or exc.status != 404:
+                        logger.warning("Failed to remove image preload pod %s/%s: %s", namespace, pod_name, exc)
 
     def run_node_script_pod(
         self,

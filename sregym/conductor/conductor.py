@@ -1458,6 +1458,14 @@ class Conductor:
         # earlier full-profile run on the same cluster.
         if svelte:
             self._trim_openebs_ndm()
+        # An interrupted preload can leave completed non-Job pods behind.
+        # Remove only our disposable helpers before checking OpenEBS readiness.
+        self.kubectl.exec_command_checked(
+            "kubectl delete pods -n openebs -l app=sregym-image-preload "
+            "--ignore-not-found=true --grace-period=0 --wait=true "
+            f"--timeout={WAIT_FOR_POD_READY_TIMEOUT}s",
+            timeout=WAIT_FOR_POD_READY_TIMEOUT + 10,
+        )
         self.kubectl.wait_for_ready("openebs")
         self._wait_for_infrastructure_ready("OpenEBS", lambda: self._openebs_ready(svelte))
         self._preload_openebs_helper_image()
