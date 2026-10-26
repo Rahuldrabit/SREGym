@@ -36,14 +36,18 @@ RUN for attempt in 1 2 3 4 5; do \
     && apt-get install -y --no-install-recommends \
         git wget jq \
         nodejs \
-        python3.12 python3.12-venv python3.12-dev python3-pip \
+        python3.12 python3.12-venv python3.12-dev \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
     && rm -rf /var/lib/apt/lists/*
 
 # ───────────────────────────────────────────────
 # 2. Python + pip
 # ───────────────────────────────────────────────
-RUN ln -sf /usr/bin/python3 /usr/bin/python
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+RUN python3 -m pip install --upgrade 'pip==26.2.1'
+
+ENV PIP_UPLOADED_PRIOR_TO=P7D
 
 # ───────────────────────────────────────────────
 # 3. kubectl
@@ -60,7 +64,7 @@ RUN KUBECTL_ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
 # 4. Python dependencies
 # ───────────────────────────────────────────────
 COPY docker/agents/requirements-container.txt /tmp/requirements-container.txt
-RUN python3 -m pip install --break-system-packages -r /tmp/requirements-container.txt
+RUN python3 -m pip install -r /tmp/requirements-container.txt
 
 # ───────────────────────────────────────────────
 # 5. Application code
