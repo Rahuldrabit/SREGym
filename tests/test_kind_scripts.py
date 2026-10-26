@@ -31,6 +31,7 @@ def shell_environment(tmp_path):
         "PATH": str(commands) + os.pathsep + os.environ["PATH"],
         "KIND_TEST_CALL_LOG": str(log),
     }
+    env.pop("SREGYM_BASELINE_CACHE_PATH", None)
 
     def run(script, *args, extra_env=None):
         result = subprocess.run(
@@ -77,14 +78,18 @@ def test_kind_setup_accepts_dind_config_and_node_image(shell_environment, tmp_pa
     assert calls[1] == f"kind create cluster --config {config} --image sregym-kind:local --retain"
 
 
-def test_kind_setup_invalidates_baseline_before_cluster_creation(shell_environment, tmp_path):
-    baseline = tmp_path / "cluster_baseline_state.json"
+@pytest.mark.parametrize("custom_cache_path", [False, True], ids=["default-path", "custom-path"])
+def test_kind_setup_invalidates_baseline_before_cluster_creation(shell_environment, tmp_path, custom_cache_path):
+    home = tmp_path / "home"
+    baseline = home / "cache_dir" / "cluster_baseline_state.json"
+    extra_env = {"HOME": str(home), "KIND_TEST_FAIL": "kind"}
+    if custom_cache_path:
+        baseline = tmp_path / "custom_baseline.json"
+        extra_env["SREGYM_BASELINE_CACHE_PATH"] = str(baseline)
+
     result, calls = shell_environment(
         "setup_kind_cluster.sh",
-        extra_env={
-            "SREGYM_BASELINE_CACHE_PATH": str(baseline),
-            "KIND_TEST_FAIL": "kind",
-        },
+        extra_env=extra_env,
     )
 
     assert result.returncode != 0
