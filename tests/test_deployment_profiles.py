@@ -36,6 +36,31 @@ def helm_values(prometheus, selected_profile):
     return values
 
 
+def prometheus_server(kind="Deployment"):
+    return {
+        "kind": kind,
+        "metadata": {"generation": 2, "labels": {"app.kubernetes.io/name": "prometheus"}},
+        "spec": {"replicas": 1},
+        "status": {
+            "observedGeneration": 2,
+            "replicas": 1,
+            "updatedReplicas": 1,
+            "readyReplicas": 1,
+            "availableReplicas": 1,
+            "currentRevision": "server-v2",
+            "updateRevision": "server-v2",
+        },
+    }
+
+
+def prometheus_pod(*, ready=True, server=True):
+    return {
+        "kind": "Pod",
+        "metadata": {"labels": {"app.kubernetes.io/name": "prometheus" if server else "prometheus-node-exporter"}},
+        "status": {"conditions": [{"type": "Ready", "status": "True" if ready else "False"}]},
+    }
+
+
 @pytest.mark.parametrize("installed", ["full", "svelte"])
 @pytest.mark.parametrize("requested", ["full", "svelte"])
 def test_prometheus_reuses_only_the_requested_profile(monkeypatch, installed, requested):
@@ -100,13 +125,55 @@ def test_prometheus_fresh_install_does_not_query_a_missing_release(monkeypatch, 
 )
 def test_prometheus_reuse_requires_every_release_pod_ready(monkeypatch, pod_conditions, expected):
     prometheus = Prometheus()
-    payload = {"items": [{"status": {"conditions": conditions}} for conditions in pod_conditions]}
+    pods = [prometheus_pod(server=index == 0) for index in range(len(pod_conditions))]
+    for pod, conditions in zip(pods, pod_conditions, strict=True):
+        pod["status"]["conditions"] = conditions
+    payload = {"items": [prometheus_server(), *pods]}
     kubectl = MagicMock()
     kubectl.exec_command.return_value = json.dumps(payload)
     monkeypatch.setattr(prometheus_module, "KubeCtl", MagicMock(return_value=kubectl))
 
     assert prometheus._is_prometheus_running() is expected
     assert "app.kubernetes.io/instance=prometheus" in kubectl.exec_command.call_args.args[0]
+
+
+@pytest.mark.parametrize("kind", ["Deployment", "StatefulSet"])
+@pytest.mark.parametrize(
+    "state", ["healthy", "missing", "zero", "old-generation", "old-replicas", "deleting", "no-server-pod"]
+)
+def test_prometheus_requires_its_current_server(monkeypatch, kind, state):
+    server = prometheus_server(kind)
+    pods = [prometheus_pod(), prometheus_pod(server=False)]
+    if state == "zero":
+        server["spec"]["replicas"] = 0
+    elif state == "old-generation":
+        server["status"]["observedGeneration"] = 1
+    elif state == "old-replicas":
+        server["status"]["updatedReplicas"] = 0
+    elif state == "deleting":
+        server["metadata"]["deletionTimestamp"] = "2026-10-26T00:00:00Z"
+    elif state == "no-server-pod":
+        pods = pods[1:]
+    payload = {"items": [*pods, *([] if state == "missing" else [server])]}
+    kubectl = MagicMock()
+    kubectl.exec_command.return_value = json.dumps(payload)
+    monkeypatch.setattr(prometheus_module, "KubeCtl", MagicMock(return_value=kubectl))
+
+    assert Prometheus()._is_prometheus_running() is (state == "healthy")
+
+
+def test_prometheus_rejects_an_unfinished_statefulset_revision():
+    server = prometheus_server("StatefulSet")
+    server["status"]["currentRevision"] = "server-v1"
+    assert not Prometheus._server_rollout_complete(server)
+
+
+@pytest.mark.parametrize("response", ["", "not JSON", '{"items": []}'])
+def test_prometheus_does_not_reuse_missing_or_unreadable_resources(monkeypatch, response):
+    kubectl = MagicMock()
+    kubectl.exec_command.return_value = response
+    monkeypatch.setattr(prometheus_module, "KubeCtl", MagicMock(return_value=kubectl))
+    assert not Prometheus()._is_prometheus_running()
 
 
 @pytest.mark.parametrize(

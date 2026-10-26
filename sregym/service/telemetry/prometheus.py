@@ -9,6 +9,7 @@ from sregym.paths import BASE_DIR, PROMETHEUS_METADATA
 from sregym.profile import is_svelte
 from sregym.service.helm import Helm
 from sregym.service.kubectl import WAIT_FOR_POD_READY_TIMEOUT, KubeCtl
+from sregym.service.rollout import deployment_rollout_complete
 
 
 class Prometheus:
@@ -163,17 +164,60 @@ class Prometheus:
             KubeCtl().wait_for_namespace_deletion(self.namespace)
 
     def _is_prometheus_running(self) -> bool:
-        """Return whether every pod owned by the Helm release is Ready."""
+        """Require a current server rollout as well as Ready release pods."""
         release_name = self.helm_configs["release_name"]
-        command = f"kubectl get pods -n {self.namespace} -l app.kubernetes.io/instance={release_name} -o json"
+        command = (
+            f"kubectl get pods,deployments,statefulsets -n {self.namespace} "
+            f"-l app.kubernetes.io/instance={release_name} -o json"
+        )
         try:
-            pods = json.loads(KubeCtl().exec_command(command)).get("items", [])
+            resources = json.loads(KubeCtl().exec_command(command)).get("items", [])
         except (subprocess.CalledProcessError, json.JSONDecodeError):
             return False
-        return bool(pods) and all(
-            any(
-                condition.get("type") == "Ready" and condition.get("status") == "True"
-                for condition in pod.get("status", {}).get("conditions", [])
-            )
+
+        pods = [resource for resource in resources if resource.get("kind") == "Pod"]
+        servers = [
+            resource
+            for resource in resources
+            if resource.get("kind") in {"Deployment", "StatefulSet"}
+            and resource.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/name") == "prometheus"
+        ]
+        server_pods = [
+            pod
             for pod in pods
+            if pod.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/name") == "prometheus"
+        ]
+        return (
+            bool(server_pods)
+            and bool(servers)
+            and all(self._server_rollout_complete(server) for server in servers)
+            and all(
+                not pod.get("metadata", {}).get("deletionTimestamp")
+                and any(
+                    condition.get("type") == "Ready" and condition.get("status") == "True"
+                    for condition in pod.get("status", {}).get("conditions", [])
+                )
+                for pod in pods
+            )
+        )
+
+    @staticmethod
+    def _server_rollout_complete(server: dict) -> bool:
+        if server["kind"] == "Deployment":
+            return deployment_rollout_complete(server)
+
+        metadata = server.get("metadata", {})
+        status = server.get("status", {})
+        desired = server.get("spec", {}).get("replicas", 1)
+        generation = metadata.get("generation")
+        observed = status.get("observedGeneration")
+        return (
+            not metadata.get("deletionTimestamp")
+            and desired > 0
+            and generation is not None
+            and observed is not None
+            and observed >= generation
+            and all(status.get(field, 0) == desired for field in ("replicas", "updatedReplicas", "readyReplicas"))
+            and bool(status.get("updateRevision"))
+            and status.get("currentRevision") == status["updateRevision"]
         )
