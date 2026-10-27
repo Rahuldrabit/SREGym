@@ -65,6 +65,49 @@ def test_transient_pull_failure_can_recover():
     sleep.assert_called_once()
 
 
+def _network_probe(*, phase="Pending", ready=False, pod_ip=None, reason=None, message=None):
+    return client.V1Pod(
+        metadata=client.V1ObjectMeta(name="sregym-cni-probe"),
+        status=client.V1PodStatus(
+            phase=phase,
+            pod_ip=pod_ip,
+            reason=reason,
+            message=message,
+            conditions=[client.V1PodCondition(type="Ready", status="True" if ready else "False")],
+        ),
+    )
+
+
+def test_network_probe_requires_a_ready_pod_with_an_ip():
+    kubectl = KubeCtl.__new__(KubeCtl)
+    kubectl.core_v1_api = Mock()
+    kubectl.core_v1_api.read_namespaced_pod.return_value = _network_probe(
+        phase="Running", ready=True, pod_ip="10.0.0.7"
+    )
+
+    kubectl.assert_pod_networking(timeout=1)
+
+    kubectl.core_v1_api.create_namespaced_pod.assert_called_once()
+    kubectl.core_v1_api.delete_namespaced_pod.assert_called_once()
+
+
+def test_network_probe_reports_cni_readiness_failure(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("sregym.service.kubectl.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("sregym.service.kubectl.time.sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+    kubectl = KubeCtl.__new__(KubeCtl)
+    kubectl.core_v1_api = Mock()
+    kubectl.core_v1_api.read_namespaced_pod.return_value = _network_probe(
+        reason="FailedCreatePodSandBox",
+        message="plugin type=calico failed (add): Unauthorized",
+    )
+
+    with pytest.raises(RuntimeError, match="Kubernetes CNI is unhealthy.*FailedCreatePodSandBox"):
+        kubectl.assert_pod_networking(timeout=2, poll_interval=1)
+
+    kubectl.core_v1_api.delete_namespaced_pod.assert_called_once()
+
+
 def test_platform_status_is_checked_before_slow_logs_from_other_pods():
     kubectl = KubeCtl.__new__(KubeCtl)
     kubectl.list_pods = Mock(return_value=client.V1PodList(items=[_failed_pod(), _pod("exec format error")]))

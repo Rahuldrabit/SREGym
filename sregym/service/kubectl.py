@@ -5,6 +5,7 @@ import json
 import logging
 import subprocess
 import time
+import uuid
 
 logger = logging.getLogger("all.infra.kubectl")
 logger.propagate = True
@@ -24,6 +25,7 @@ from kubernetes.client.rest import ApiException  # noqa: E402
 from logger import console  # noqa: E402
 
 WAIT_FOR_POD_READY_TIMEOUT = int(os.getenv("WAIT_FOR_POD_READY_TIMEOUT", "600"))
+NETWORK_PROBE_TIMEOUT = int(os.getenv("SREGYM_NETWORK_PROBE_TIMEOUT", "60"))
 PLATFORM_ERROR_MARKERS = (
     "exec format error",
     "no matching manifest for",
@@ -63,6 +65,63 @@ class KubeCtl:
     def list_nodes(self):
         """Return a list of all running nodes."""
         return self.core_v1_api.list_node()
+
+    def assert_pod_networking(
+        self,
+        namespace: str = "kube-system",
+        timeout: int = NETWORK_PROBE_TIMEOUT,
+        poll_interval: float = 1,
+    ) -> None:
+        """Require the cluster CNI to create a Ready, networked pod.
+
+        Node and Calico DaemonSet readiness do not guarantee that the host CNI
+        credentials can create a workload sandbox. Probe that path before an
+        evaluation provisions its infrastructure so CNI failures have a clear,
+        bounded error rather than surfacing as unrelated deployment timeouts.
+        """
+        name = f"sregym-cni-probe-{uuid.uuid4().hex[:12]}"
+        pod = client.V1Pod(
+            metadata=client.V1ObjectMeta(name=name, labels={"app": "sregym-cni-probe"}),
+            spec=client.V1PodSpec(
+                restart_policy="Never",
+                containers=[client.V1Container(name="pause", image="registry.k8s.io/pause:3.10")],
+            ),
+        )
+        deadline = time.monotonic() + timeout
+        last_state = "pod was not observed"
+        try:
+            self.core_v1_api.create_namespaced_pod(namespace, pod, _request_timeout=10)
+            while time.monotonic() < deadline:
+                observed = self.core_v1_api.read_namespaced_pod(name, namespace, _request_timeout=10)
+                status = observed.status
+                phase = status.phase or "Unknown"
+                reason = status.reason or ""
+                message = status.message or ""
+                last_state = ": ".join(part for part in (phase, reason, message) if part)
+                if any(
+                    condition.type == "Ready" and condition.status == "True" for condition in status.conditions or []
+                ):
+                    if not status.pod_ip:
+                        last_state = "Ready pod has no assigned IP"
+                    else:
+                        return
+                if phase == "Failed":
+                    break
+                time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
+        except ApiException as exc:
+            raise RuntimeError(f"Kubernetes CNI probe could not be created or read: {exc.reason}") from exc
+        finally:
+            with contextlib.suppress(ApiException):
+                self.core_v1_api.delete_namespaced_pod(
+                    name,
+                    namespace,
+                    body=client.V1DeleteOptions(grace_period_seconds=0),
+                    _request_timeout=10,
+                )
+        raise RuntimeError(
+            f"Kubernetes CNI is unhealthy: probe pod {namespace}/{name} did not become Ready with an IP "
+            f"within {timeout}s ({last_state}). Check Calico node logs and FailedCreatePodSandBox events."
+        )
 
     def get_node_free_pct(self, node_name: str) -> int:
         """Return the nodefs free-space percentage as reported by kubelet stats summary."""

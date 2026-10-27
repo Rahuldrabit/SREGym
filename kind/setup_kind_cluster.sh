@@ -111,6 +111,42 @@ if ! kubectl wait --for=condition=Ready nodes --all --timeout=120s; then
     exit 1
 fi
 
+echo "==> Step 3c: Confirm Calico can create a pod sandbox"
+# The Calico DaemonSet can be Ready while the host CNI kubeconfig has an
+# expired or invalid token. In that state Kubernetes nodes remain Ready, but
+# every newly scheduled pod fails with FailedCreatePodSandBox. Create a small
+# pod so setup fails here with the relevant diagnostics instead of later while
+# an application deployment waits for readiness.
+NETWORK_PROBE_NAMESPACE="${NETWORK_PROBE_NAMESPACE:-kube-system}"
+NETWORK_PROBE_IMAGE="${NETWORK_PROBE_IMAGE:-registry.k8s.io/pause:3.10}"
+NETWORK_PROBE_TIMEOUT="${NETWORK_PROBE_TIMEOUT:-120s}"
+NETWORK_PROBE_NAME="sregym-cni-probe-${RANDOM}-${RANDOM}"
+
+cleanup_network_probe() {
+    kubectl delete pod "${NETWORK_PROBE_NAME}" --namespace="${NETWORK_PROBE_NAMESPACE}" \
+        --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+
+if ! kubectl run "${NETWORK_PROBE_NAME}" --namespace="${NETWORK_PROBE_NAMESPACE}" \
+    --image="${NETWORK_PROBE_IMAGE}" --image-pull-policy=IfNotPresent --restart=Never \
+    --labels="app=sregym-cni-probe"; then
+    echo "❌ Could not create a Calico network probe pod."
+    exit 1
+fi
+
+if ! kubectl wait --for=condition=Ready "pod/${NETWORK_PROBE_NAME}" \
+    --namespace="${NETWORK_PROBE_NAMESPACE}" --timeout="${NETWORK_PROBE_TIMEOUT}"; then
+    echo "❌ Calico cannot create a Ready pod sandbox within ${NETWORK_PROBE_TIMEOUT}."
+    echo "--- network probe pod ---"
+    kubectl get pod "${NETWORK_PROBE_NAME}" --namespace="${NETWORK_PROBE_NAMESPACE}" -o wide || true
+    kubectl describe pod "${NETWORK_PROBE_NAME}" --namespace="${NETWORK_PROBE_NAMESPACE}" || true
+    echo "--- recent ${NETWORK_PROBE_NAMESPACE} events ---"
+    kubectl get events --namespace="${NETWORK_PROBE_NAMESPACE}" --sort-by='.lastTimestamp' | tail -40 || true
+    cleanup_network_probe
+    exit 1
+fi
+cleanup_network_probe
+
 echo "==> Step 4: Delete SREGym cluster baseline cache"
 # SREGym caches the cluster baseline state after first deployment.
 # Deleting it forces SREGym to capture a fresh baseline with Calico installed.

@@ -51,6 +51,8 @@ def test_kind_setup_uses_shared_config_for_default_and_legacy_aliases(shell_envi
     assert calls[0].startswith("kind create cluster --config ")
     assert calls[0].endswith("kind-config.yaml")
     assert any("kubectl wait --for=condition=Ready nodes --all" in call for call in calls)
+    assert any("kubectl run sregym-cni-probe-" in call for call in calls)
+    assert any("kubectl wait --for=condition=Ready pod/sregym-cni-probe-" in call for call in calls)
 
 
 def test_unknown_argument_fails_before_creating_cluster(shell_environment):
