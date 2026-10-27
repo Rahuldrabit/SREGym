@@ -11,7 +11,7 @@ import yaml
 from kubernetes.client.rest import ApiException
 
 from sregym.generators.fault.base import FaultInjector
-from sregym.paths import CACHE_DIR, TARGET_MICROSERVICES
+from sregym.paths import CACHE_DIR, SOCIAL_NETWORK_IMAGE_VALUES, TARGET_MICROSERVICES
 from sregym.service.helm import Helm
 from sregym.service.kubectl import KubeCtl
 from sregym.service.rollout import deployment_rollout_complete
@@ -84,7 +84,7 @@ class VirtualizationFaultInjector(FaultInjector):
                 "release_name": "social-network",
                 "chart_path": TARGET_MICROSERVICES / "socialNetwork/helm-chart/socialnetwork/",
                 "namespace": self.namespace,
-                "values_file": TARGET_MICROSERVICES / "socialNetwork/helm-chart/socialnetwork/values.yaml",
+                "values_file": SOCIAL_NETWORK_IMAGE_VALUES,
                 "set_values": set_values,
             }
 
@@ -107,7 +107,7 @@ class VirtualizationFaultInjector(FaultInjector):
                 "release_name": "social-network",
                 "chart_path": TARGET_MICROSERVICES / "socialNetwork/helm-chart/socialnetwork/",
                 "namespace": self.namespace,
-                "values_file": TARGET_MICROSERVICES / "socialNetwork/helm-chart/socialnetwork/values.yaml",
+                "values_file": SOCIAL_NETWORK_IMAGE_VALUES,
                 "set_values": set_values,
             }
 
